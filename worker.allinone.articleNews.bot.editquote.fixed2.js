@@ -16,10 +16,33 @@ export default {
           miniappUrl: miniUrl || null,
           hasTelegramBotToken: !!String(env.TELEGRAM_BOT_TOKEN || "").trim(),
           authLenient: ["1","true","yes"].includes(String(env.MINIAPP_AUTH_LENIENT || "").trim().toLowerCase()),
+          authSoft: ["1", "true", "yes", "on", ""].includes(String(env.MINIAPP_AUTH_SOFT || "").trim().toLowerCase()),
           initDataMaxAgeSec: Math.max(60, Number(env.INITDATA_MAX_AGE_SEC || 0) || (7 * 24 * 60 * 60)),
         });
       }
 
+      if (url.pathname === "/api/miniapp/auth-debug" && request.method === "POST") {
+        const body = await request.json().catch(() => ({}));
+        const initData = String(body?.initData || "");
+        const miniToken = String(body?.miniToken || "");
+        const vInit = await verifyTelegramInitData(initData, env.TELEGRAM_BOT_TOKEN, env.INITDATA_MAX_AGE_SEC, env.MINIAPP_AUTH_LENIENT);
+        const vToken = miniToken ? await verifyMiniappToken(miniToken, env) : { ok: false, reason: "token_missing" };
+        const vAuth = await verifyMiniappAuth({ initData, miniToken }, env);
+        const hints = [];
+        if (!vInit.ok) hints.push(`initData: ${String(vInit.reason || "invalid")}`);
+        if (!vToken.ok) hints.push(`miniToken: ${String(vToken.reason || "invalid")}`);
+        if (!vAuth.ok) hints.push("auth: neither initData nor miniToken passed");
+        if (!hints.length) hints.push("auth passed");
+        return jsonResponse({
+          ok: true,
+          initDataLength: initData.length,
+          miniTokenLength: miniToken.length,
+          verifyInitData: { ok: !!vInit.ok, reason: vInit.reason || "" },
+          verifyMiniToken: { ok: !!vToken.ok, reason: vToken.reason || "" },
+          verifyAuth: { ok: !!vAuth.ok, via: vAuth.via || "", reason: vAuth.reason || "" },
+          hints,
+        });
+      }
       // ===== MINI APP (inline) =====
       // Serve app.js from root and nested miniapp paths (e.g. /miniapp/app.js)
       if (request.method === "GET" && (url.pathname === "/app.js" || url.pathname.endsWith("/app.js"))) {
@@ -1095,7 +1118,7 @@ const MINIAPP_EXEC_CHECKLIST = [
   "2) Mini App را فقط از دکمه /miniapp داخل تلگرام باز کنید (مرورگر عادی معتبر نیست).",
   "3) تاریخ/ساعت موبایل را Auto کنید تا initData منقضی نشود.",
   "4) اگر 401 گرفتید، Mini App را کامل ببندید و دوباره /miniapp را بزنید.",
-  "5) /health و /api/miniapp/diag را بررسی کنید و نتیجه را برای پشتیبانی ارسال کنید.",
+  "5) /health و /api/miniapp/diag و /api/miniapp/auth-debug را بررسی کنید و نتیجه را برای پشتیبانی ارسال کنید.",
 ].join("\n");
 
 /* ========================== UTILS ========================== */
@@ -7182,7 +7205,7 @@ const MINIAPP_EXEC_CHECKLIST = [
   "3) VPN/Proxy را یک‌بار خاموش/روشن و دوباره تست کنید.",
   "4) اپ تلگرام را آپدیت کنید و Mini App cache را پاک کنید.",
   "5) اگر خطای 401 بود، اپ را کامل ببندید و از دکمه /miniapp دوباره وارد شوید.",
-  "6) مسیرهای /health و /api/miniapp/diag را چک کنید.",
+  "6) مسیرهای /health و /api/miniapp/diag و /api/miniapp/auth-debug را چک کنید.",
   "7) اگر هنوز وصل نشد، خروجی /api/user را برای پشتیبانی ارسال کنید."
 ].join("\n");
 
@@ -8022,7 +8045,20 @@ async function boot(){
       pillTxt.textContent = "Offline (Guest)";
       out.textContent = "حالت محدود فعال شد ✅ داده‌های پایه بارگذاری شدند.";
       showToast("حالت محدود", "برای همه امکانات، مینی‌اپ را از داخل تلگرام باز کنید.", "GUEST", false);
-      if (status === 401) out.textContent = "اتصال کامل برقرار نشد.\n\n" + MINIAPP_EXEC_CHECKLIST;
+      if (status === 401) {
+        const debugText = [
+          "اتصال کامل برقرار نشد.",
+          "",
+          "Debug سریع:",
+          "API_BASE: " + API_BASE,
+          "TelegramRuntime: " + (isTelegramRuntime ? "yes" : "no"),
+          "initData: " + (INIT_DATA ? "present" : "missing"),
+          "miniToken: " + ((MINI_TOKEN || localStorage.getItem(LOCAL_KEYS.miniToken) || "") ? "present" : "missing"),
+          "",
+          MINIAPP_EXEC_CHECKLIST,
+        ].join("\n");
+        out.textContent = debugText;
+      }
       setupLiveQuotePolling();
       setupNewsPolling();
       return;
