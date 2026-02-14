@@ -7,6 +7,18 @@ export default {
       url.pathname = normalizeWorkerPath(url.pathname);
 
       if (url.pathname === "/health") return new Response("ok", { status: 200 });
+      if (url.pathname === "/api/miniapp/diag" && request.method === "GET") {
+        const miniUrl = getMiniappUrl(env);
+        return jsonResponse({
+          ok: true,
+          apiBase: computeApiBase(env, url),
+          miniappUrlConfigured: !!miniUrl,
+          miniappUrl: miniUrl || null,
+          hasTelegramBotToken: !!String(env.TELEGRAM_BOT_TOKEN || "").trim(),
+          authLenient: ["1","true","yes"].includes(String(env.MINIAPP_AUTH_LENIENT || "").trim().toLowerCase()),
+          initDataMaxAgeSec: Math.max(60, Number(env.INITDATA_MAX_AGE_SEC || 0) || (7 * 24 * 60 * 60)),
+        });
+      }
 
       // ===== MINI APP (inline) =====
       // Serve app.js from root and nested miniapp paths (e.g. /miniapp/app.js)
@@ -1078,6 +1090,14 @@ const TIMEOUT_TEXT_MS = 38000;
 const TIMEOUT_VISION_MS = 12000;
 const TIMEOUT_POLISH_MS = 15000;
 
+const MINIAPP_EXEC_CHECKLIST = [
+  "1) MINIAPP_URL یا PUBLIC_BASE_URL را روی دامنه همین Worker تنظیم کنید (با https://).",
+  "2) Mini App را فقط از دکمه /miniapp داخل تلگرام باز کنید (مرورگر عادی معتبر نیست).",
+  "3) تاریخ/ساعت موبایل را Auto کنید تا initData منقضی نشود.",
+  "4) اگر 401 گرفتید، Mini App را کامل ببندید و دوباره /miniapp را بزنید.",
+  "5) /health و /api/miniapp/diag را بررسی کنید و نتیجه را برای پشتیبانی ارسال کنید.",
+].join("\n");
+
 /* ========================== UTILS ========================== */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -1902,6 +1922,34 @@ function listKeyboard(items, columns = 2) {
   return kb(rows);
 }
 
+function numberedSymbolKeyboard(items, columns = 2) {
+  const rows = [];
+  const symbols = Array.isArray(items) ? items : [];
+  for (let i = 0; i < symbols.length; i += columns) {
+    const row = [];
+    for (let j = i; j < Math.min(i + columns, symbols.length); j++) {
+      row.push(`📌 ${j + 1}) ${symbols[j]}`);
+    }
+    rows.push(row);
+  }
+  rows.push([BTN.BACK, BTN.HOME]);
+  return kb(rows);
+}
+
+function allSymbolsList() {
+  return [...MAJORS, ...METALS, ...INDICES, ...CRYPTOS];
+}
+
+function extractSymbolFromText(text) {
+  const raw = String(text || "").toUpperCase();
+  if (!raw) return "";
+  if (isSymbol(raw.trim())) return raw.trim();
+  for (const sym of allSymbolsList()) {
+    if (raw.includes(sym)) return sym;
+  }
+  return "";
+}
+
 function optionsKeyboard(options) {
   const rows = [];
   for (let i = 0; i < options.length; i += 2) rows.push(options.slice(i, i + 2));
@@ -1917,13 +1965,11 @@ function contactKeyboard() {
   };
 }
 
-const DEFAULT_MINIAPP_URL = "https://sniperim.mad-pyc.workers.dev/";
-
 function getMiniappUrl(env) {
   const configured = (env.MINIAPP_URL || env.PUBLIC_BASE_URL || "").toString().trim();
-  const raw = configured || DEFAULT_MINIAPP_URL;
+  if (!configured) return "";
   try {
-    const u = new URL(raw);
+    const u = new URL(configured);
     // Keep configured pathname (supports prefix routes like https://domain.com/miniapp/)
     u.search = "";
     u.hash = "";
@@ -1931,7 +1977,7 @@ function getMiniappUrl(env) {
     if (!u.pathname.endsWith("/")) u.pathname = u.pathname + "/";
     return u.toString();
   } catch {
-    return DEFAULT_MINIAPP_URL;
+    return "";
   }
 }
 async function miniappInlineKeyboard(env, st, from) {
@@ -2294,7 +2340,7 @@ function buildBotNewsKeyboard(env, nonce, symbol, articles) {
   const list = Array.isArray(articles) ? articles : [];
   for (let i = 0; i < list.length; i++) {
     const a = list[i] || {};
-    const row = /** @type {any[]} */ ([{ text: `🧠 تحلیل ${i + 1}`, callback_data: `na|${nonce}|${i}` }]);
+    const row = /** @type {any[]} */ ([{ text: `🧠 تحلیل خبر ${i + 1} | ${sym}`, callback_data: `na|${nonce}|${i}` }]);
     if (a.url) row.push({ text: `🔗 خبر ${i + 1}`, url: String(a.url) });
     rows.push(row);
   }
@@ -4786,9 +4832,18 @@ TxID پرداخت را همینجا بفرست (در صورت نیاز: <txid> <
 
     if (text === "/quote" || text === BTN.QUOTE || text.startsWith("/quote ")) {
       const arg = text.startsWith("/quote ") ? text.split(" ").slice(1).join(" ").trim() : "";
-      const symbol = String(arg || st.selectedSymbol || "BTCUSDT").toUpperCase();
+      const argSymbol = extractSymbolFromText(arg);
+      if (!argSymbol) {
+        st.state = "pick_symbol_quote";
+        await saveUser(userId, st, env);
+        return tgSendMessage(env, chatId, "💹 برای قیمت لحظه‌ای، نماد را انتخاب کن:", numberedSymbolKeyboard(allSymbolsList()));
+      }
+
+      const symbol = String(argSymbol).toUpperCase();
       const tf = String(st.timeframe || "H4").toUpperCase();
-      if (isSymbol(symbol)) { st.selectedSymbol = symbol; await saveUser(userId, st, env); }
+      st.selectedSymbol = symbol;
+      st.state = "idle";
+      await saveUser(userId, st, env);
       try {
         const candles = await getMarketCandlesWithFallback(env, symbol, tf);
         const snap = computeSnapshot(candles || []);
@@ -4806,21 +4861,23 @@ TF: ${tf}
       }
     }
 
-    
-if (text === "/news" || text === BTN.NEWS || text.startsWith("/news ")) {
+    if (text === "/news" || text === BTN.NEWS || text.startsWith("/news ")) {
       const args = text.startsWith("/news ") ? text.split(" ").slice(1).filter(Boolean) : [];
-      const argSym = (args[0] || "").toString().trim().toUpperCase().replace(/\s+/g, "");
+      const argSym = extractSymbolFromText((args[0] || "").toString());
       const argLimit = Number(args[1] || "");
-      let symbol = String(argSym || st.selectedSymbol || "BTCUSDT").toUpperCase();
-      if (!isSymbol(symbol)) symbol = String(st.selectedSymbol || "BTCUSDT").toUpperCase();
+      if (!argSym) {
+        st.state = "pick_symbol_news";
+        await saveUser(userId, st, env);
+        return tgSendMessage(env, chatId, "📰 برای دریافت خبر، نماد را انتخاب کن:", numberedSymbolKeyboard(allSymbolsList()));
+      }
+
+      const symbol = String(argSym).toUpperCase();
       let limit = Number.isFinite(argLimit) && argLimit > 0 ? argLimit : 6;
       limit = Math.max(3, Math.min(10, Math.floor(limit)));
 
-      if (argSym && isSymbol(argSym)) {
-        st.selectedSymbol = argSym;
-        await saveUser(userId, st, env);
-        symbol = argSym;
-      }
+      st.selectedSymbol = symbol;
+      st.state = "idle";
+      await saveUser(userId, st, env);
 
       try {
         const rows = await fetchSymbolNewsFa(symbol, limit, env);
@@ -4837,16 +4894,9 @@ if (text === "/news" || text === BTN.NEWS || text.startsWith("/news ")) {
     }
 
     if (text === "/newsanalyze" || text === BTN.NEWS_ANALYSIS) {
-      const symbol = String(st.selectedSymbol || "BTCUSDT").toUpperCase();
-      try {
-        const rows = await fetchSymbolNewsFa(symbol, 5, env);
-        const summary = await buildNewsAnalysisSummary(symbol, rows || [], env);
-        return tgSendMessage(env, chatId, `🧠 تحلیل خبر ${symbol}
-
-${summary || "تحلیل خبری در دسترس نیست."}`, mainMenuKeyboard(env));
-      } catch (e) {
-        return tgSendMessage(env, chatId, "⚠️ تحلیل خبر در دسترس نیست.", mainMenuKeyboard(env));
-      }
+      st.state = "pick_symbol_news_analysis";
+      await saveUser(userId, st, env);
+      return tgSendMessage(env, chatId, "🧠 برای تحلیل خبر، نماد را انتخاب کن:", numberedSymbolKeyboard(allSymbolsList()));
     }
 
     if (text === "/miniapp" || text === BTN.MINIAPP) {
@@ -4925,6 +4975,11 @@ ${MINIAPP_EXEC_CHECKLIST}`, kbInline);
         st.state = "idle";
         await saveUser(userId, st, env);
         return sendSettingsSummary(env, chatId, st, from);
+      }
+      if (st.state.startsWith("pick_symbol_")) {
+        st.state = "idle";
+        await saveUser(userId, st, env);
+        return tgSendMessage(env, chatId, "🏠 منوی اصلی:", mainMenuKeyboard(env));
       }
       return tgSendMessage(env, chatId, "🏠 منوی اصلی:", mainMenuKeyboard(env));
     }
@@ -5181,6 +5236,72 @@ ${textClean}`);
       return tgSendMessage(env, chatId, "✅ درخواست شما ثبت شد. بعد از تایید ادمین، پرامپت اختصاصی فعال می‌شود.", mainMenuKeyboard(env));
     }
 
+
+    if (["pick_symbol_quote", "pick_symbol_news", "pick_symbol_news_analysis"].includes(st.state)) {
+      const picked = extractSymbolFromText(text);
+      if (!picked || !isSymbol(picked)) {
+        const label = st.state === "pick_symbol_quote"
+          ? "قیمت لحظه‌ای"
+          : (st.state === "pick_symbol_news" ? "اخبار" : "تحلیل خبر");
+        return tgSendMessage(env, chatId, `نماد معتبر نیست. برای ${label} یکی از نمادهای لیست را انتخاب کن.`, numberedSymbolKeyboard(allSymbolsList()));
+      }
+
+      st.selectedSymbol = picked;
+
+      if (st.state === "pick_symbol_quote") {
+        const tf = String(st.timeframe || "H4").toUpperCase();
+        st.state = "idle";
+        await saveUser(userId, st, env);
+        try {
+          const candles = await getMarketCandlesWithFallback(env, picked, tf);
+          const snap = computeSnapshot(candles || []);
+          if (!snap) throw new Error("quote_unavailable");
+          const msgQ = `💹 قیمت لحظه‌ای
+
+نماد: ${picked}
+TF: ${tf}
+قیمت: ${snap.lastPrice}
+تغییر: ${snap.changePct}%
+روند: ${snap.trend || "نامشخص"}`;
+          return tgSendMessage(env, chatId, msgQ, mainMenuKeyboard(env));
+        } catch {
+          return tgSendMessage(env, chatId, "⚠️ قیمت لحظه‌ای در دسترس نیست. کمی بعد دوباره تلاش کن.", mainMenuKeyboard(env));
+        }
+      }
+
+      if (st.state === "pick_symbol_news") {
+        st.state = "idle";
+        await saveUser(userId, st, env);
+        try {
+          const rows = await fetchSymbolNewsFa(picked, 6, env);
+          const articles = (rows || []).slice(0, 6);
+          const lines = articles.map((x, i) => `${i + 1}) ${x.title || "-"}`).join("\n");
+          const listText = `📰 اخبار ${picked}
+
+${lines || "خبری پیدا نشد."}
+
+💡 روی «تحلیل» بزن تا همینجا تحلیل باز شود.`;
+          const nonce = makeNonce(10);
+          const kb = buildBotNewsKeyboard(env, nonce, picked, articles);
+          await saveBotNewsContext(env, picked, articles, listText, kb, 3600, nonce);
+          return tgSendMessage(env, chatId, listText, kb);
+        } catch {
+          return tgSendMessage(env, chatId, "⚠️ خبر مرتبط در دسترس نیست.", mainMenuKeyboard(env));
+        }
+      }
+
+      st.state = "idle";
+      await saveUser(userId, st, env);
+      try {
+        const rows = await fetchSymbolNewsFa(picked, 5, env);
+        const summary = await buildNewsAnalysisSummary(picked, rows || [], env);
+        return tgSendMessage(env, chatId, `🧠 تحلیل خبر ${picked}
+
+${summary || "تحلیل خبری در دسترس نیست."}`, mainMenuKeyboard(env));
+      } catch {
+        return tgSendMessage(env, chatId, "⚠️ تحلیل خبر در دسترس نیست.", mainMenuKeyboard(env));
+      }
+    }
 
     if (isSymbol(text)) {
       if (!st.profile?.name || !st.profile?.phone) {
@@ -7017,7 +7138,8 @@ const MINIAPP_EXEC_CHECKLIST = [
   "3) VPN/Proxy را یک‌بار خاموش/روشن و دوباره تست کنید.",
   "4) اپ تلگرام را آپدیت کنید و Mini App cache را پاک کنید.",
   "5) اگر خطای 401 بود، اپ را کامل ببندید و از دکمه /miniapp دوباره وارد شوید.",
-  "6) اگر هنوز وصل نشد، لاگ /health و پاسخ /api/user را برای پشتیبانی ارسال کنید."
+  "6) مسیرهای /health و /api/miniapp/diag را چک کنید.",
+  "7) اگر هنوز وصل نشد، خروجی /api/user را برای پشتیبانی ارسال کنید."
 ].join("\n");
 
 function getFreshInitData() {
@@ -7778,8 +7900,11 @@ async function boot(){
 
   // Telegram WebApp may populate initData with a slight delay.
   if (isTelegramRuntime && !initData) {
-    await new Promise((r) => setTimeout(r, 350));
-    initData = (tg?.initData || "").trim();
+    for (let i = 0; i < 8; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      initData = (tg?.initData || "").trim();
+      if (initData) break;
+    }
   }
 
   if (initData) {
