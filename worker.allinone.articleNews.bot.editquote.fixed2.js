@@ -7405,6 +7405,26 @@ async function adminApi(path, body){
   return api(path, buildAuthBody(body));
 }
 
+async function fetchAuthDebugSnapshot(){
+  try {
+    const payload = {
+      initData: getFreshInitData(),
+      miniToken: MINI_TOKEN || localStorage.getItem(LOCAL_KEYS.miniToken) || "",
+    };
+    const { json } = await api("/api/miniapp/auth-debug", payload);
+    if (!json?.ok) return "auth-debug unavailable";
+    const out = [
+      "auth-debug:",
+      "initData=" + (json?.verifyInitData?.ok ? "ok" : ("fail:" + (json?.verifyInitData?.reason || ""))),
+      "miniToken=" + (json?.verifyMiniToken?.ok ? "ok" : ("fail:" + (json?.verifyMiniToken?.reason || ""))),
+      "auth=" + (json?.verifyAuth?.ok ? ("ok via " + (json?.verifyAuth?.via || "unknown")) : ("fail:" + (json?.verifyAuth?.reason || ""))),
+    ];
+    return out.join(" | ");
+  } catch {
+    return "auth-debug failed";
+  }
+}
+
 function prettyErr(j, status){
   const e = j?.error || "نامشخص";
   if (status === 429 && String(e).startsWith("quota_exceeded")) return "سهمیه امروز تمام شد.";
@@ -8065,6 +8085,7 @@ async function boot(){
       out.textContent = "حالت محدود فعال شد ✅ داده‌های پایه بارگذاری شدند.";
       showToast("حالت محدود", "برای همه امکانات، مینی‌اپ را از داخل تلگرام باز کنید.", "GUEST", false);
       if (status === 401) {
+        const authDebug = await fetchAuthDebugSnapshot();
         const debugText = [
           "اتصال کامل برقرار نشد.",
           "",
@@ -8073,6 +8094,7 @@ async function boot(){
           "TelegramRuntime: " + (isTelegramRuntime ? "yes" : "no"),
           "initData: " + (INIT_DATA ? "present" : "missing"),
           "miniToken: " + ((MINI_TOKEN || localStorage.getItem(LOCAL_KEYS.miniToken) || "") ? "present" : "missing"),
+          String(authDebug || ""),
           "",
           MINIAPP_EXEC_CHECKLIST,
         ].join("\n");
@@ -8703,7 +8725,11 @@ el("paymentPresets")?.addEventListener("click", (e) => {
   showToast("پلن انتخاب شد ✅", "روز: " + days + " | مبلغ: " + amount, "PAY", false);
 });
 
-boot();`;
+boot().catch((e) => {
+  const msg = String(e?.message || e || "boot_failed");
+  if (out) out.textContent = "⚠️ خطا در راه‌اندازی مینی‌اپ: " + msg;
+  showToast("خطا", msg, "BOOT", false);
+});`;
 
 
 async function runDailySuggestions(env) {
