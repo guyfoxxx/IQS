@@ -9,6 +9,9 @@ export default {
       if (url.pathname === "/health") return new Response("ok", { status: 200 });
       if (url.pathname === "/api/miniapp/diag" && request.method === "GET") {
         const miniUrl = getMiniappUrl(env);
+        const hints = [];
+        if (!miniUrl) hints.push("MINIAPP_URL or PUBLIC_BASE_URL is not configured");
+        if (!String(env.TELEGRAM_BOT_TOKEN || "").trim()) hints.push("TELEGRAM_BOT_TOKEN is missing");
         return jsonResponse({
           ok: true,
           apiBase: computeApiBase(env, url),
@@ -18,6 +21,7 @@ export default {
           authLenient: ["1","true","yes"].includes(String(env.MINIAPP_AUTH_LENIENT || "").trim().toLowerCase()),
           authSoft: ["1", "true", "yes", "on", ""].includes(String(env.MINIAPP_AUTH_SOFT || "").trim().toLowerCase()),
           initDataMaxAgeSec: Math.max(60, Number(env.INITDATA_MAX_AGE_SEC || 0) || (7 * 24 * 60 * 60)),
+          hints,
         });
       }
 
@@ -6188,6 +6192,21 @@ function guessBasePath(pathname) {
   const p = String(pathname || "");
   if (!p || p === "/") return "";
   const clean = p.replace(/\/+$/, "");
+
+  // If we're on an API or Telegram route, use its prefix as base mount.
+  // Examples:
+  // - /api/miniapp/diag => ""
+  // - /bot/api/miniapp/diag => "/bot"
+  const apiIdx = clean.indexOf("/api/");
+  if (apiIdx >= 0) {
+    const d = clean.slice(0, apiIdx) || "";
+    return d === "/" ? "" : d;
+  }
+  const tgIdx = clean.indexOf("/telegram/");
+  if (tgIdx >= 0) {
+    const d = clean.slice(0, tgIdx) || "";
+    return d === "/" ? "" : d;
+  }
 
   // Known miniapp entrypoints served by this worker
   const knownLeafs = ["/miniapp", "/app.js", "/favicon.ico"];
