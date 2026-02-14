@@ -7896,15 +7896,20 @@ async function boot(){
     MINI_TOKEN = resolvedMiniToken;
     try { localStorage.setItem(LOCAL_KEYS.miniToken, resolvedMiniToken); } catch {}
   }
-  let initData = (tg?.initData || "").trim();
-
-  // Telegram WebApp may populate initData with a slight delay.
-  if (isTelegramRuntime && !initData) {
-    for (let i = 0; i < 8; i++) {
-      await new Promise((r) => setTimeout(r, 250));
-      initData = (tg?.initData || "").trim();
-      if (initData) break;
+  const waitForInitData = async (maxLoops = 8, delayMs = 250) => {
+    let latest = (tg?.initData || "").trim();
+    if (latest) return latest;
+    for (let i = 0; i < maxLoops; i++) {
+      await new Promise((r) => setTimeout(r, delayMs));
+      latest = (tg?.initData || "").trim();
+      if (latest) return latest;
     }
+    return "";
+  };
+
+  let initData = (tg?.initData || "").trim();
+  if (isTelegramRuntime && !initData) {
+    initData = await waitForInitData(8, 250);
   }
 
   if (initData) {
@@ -7924,8 +7929,10 @@ async function boot(){
     INIT_DATA = "";
     showToast("حالت مهمان", "اتصال احراز نشده؛ اجرای محدود با داده عمومی", "GUEST", false);
   }
+
   let {status, json} = await api("/api/user", buildAuthBody({ allowGuest: true }));
 
+  // fallback 1: stale/expired initData -> retry with token only
   if (!json?.ok && status === 401 && (MINI_TOKEN || localStorage.getItem(LOCAL_KEYS.miniToken))) {
     const initBackup = INIT_DATA;
     INIT_DATA = "";
@@ -7933,6 +7940,18 @@ async function boot(){
     status = retry.status;
     json = retry.json;
     if (!json?.ok) INIT_DATA = initBackup;
+  }
+
+  // fallback 2: Telegram runtime may inject initData late, refresh once more and retry
+  if (!json?.ok && status === 401 && isTelegramRuntime) {
+    const refreshed = await waitForInitData(4, 250);
+    if (refreshed) {
+      INIT_DATA = refreshed;
+      try { localStorage.setItem(LOCAL_KEYS.initData, refreshed); } catch {}
+      const retryFresh = await api("/api/user", buildAuthBody({ allowGuest: true }));
+      status = retryFresh.status;
+      json = retryFresh.json;
+    }
   }
 
   if (!json?.ok) {
