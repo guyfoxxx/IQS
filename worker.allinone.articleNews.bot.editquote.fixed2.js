@@ -1881,6 +1881,14 @@ function signalMenuKeyboard() {
   return kb([[BTN.CAT_MAJORS, BTN.CAT_METALS], [BTN.CAT_INDICES, BTN.CAT_CRYPTO], [BTN.QUOTE, BTN.NEWS], [BTN.BACK, BTN.HOME]]);
 }
 
+function symbolPickerKeyboard(columns = 3) {
+  const symbols = [...MAJORS, ...METALS, ...INDICES, ...CRYPTOS];
+  const rows = [];
+  for (let i = 0; i < symbols.length; i += columns) rows.push(symbols.slice(i, i + columns));
+  rows.push([BTN.BACK, BTN.HOME]);
+  return kb(rows);
+}
+
 function settingsMenuKeyboard() {
 
   return kb([[BTN.SET_TF, BTN.SET_STYLE], [BTN.SET_RISK, BTN.SET_NEWS], [BTN.SET_CAPITAL, BTN.REQUEST_CUSTOM_PROMPT], [BTN.BACK, BTN.HOME]]);
@@ -2294,8 +2302,8 @@ function buildBotNewsKeyboard(env, nonce, symbol, articles) {
   const list = Array.isArray(articles) ? articles : [];
   for (let i = 0; i < list.length; i++) {
     const a = list[i] || {};
-    const row = /** @type {any[]} */ ([{ text: `🧠 تحلیل ${i + 1}`, callback_data: `na|${nonce}|${i}` }]);
-    if (a.url) row.push({ text: `🔗 خبر ${i + 1}`, url: String(a.url) });
+    const row = /** @type {any[]} */ ([{ text: `🧠 ${sym} خبر ${i + 1}`, callback_data: `na|${nonce}|${i}` }]);
+    if (a.url) row.push({ text: `🔗 ${sym} خبر ${i + 1}`, url: String(a.url) });
     rows.push(row);
   }
   return { inline_keyboard: rows };
@@ -2305,6 +2313,66 @@ function clampText(str, maxLen) {
   const s = String(str || "");
   if (s.length <= maxLen) return s;
   return s.slice(0, Math.max(0, maxLen - 1)) + "…";
+}
+
+async function sendQuoteSnapshotMessage(env, chatId, userId, from, st, rawSymbol) {
+  const symbol = String(rawSymbol || "").trim().toUpperCase();
+  if (!isSymbol(symbol)) {
+    st.state = "choose_symbol_for_quote";
+    await saveUser(userId, st, env);
+    return tgSendMessage(env, chatId, "❌ نماد معتبر نیست. لطفاً یک نماد را برای قیمت لحظه‌ای انتخاب کن:", symbolPickerKeyboard());
+  }
+
+  const tf = String(st.timeframe || "H4").toUpperCase();
+  st.selectedSymbol = symbol;
+  st.state = "idle";
+  await saveUser(userId, st, env);
+
+  try {
+    const candles = await getMarketCandlesWithFallback(env, symbol, tf);
+    const snap = computeSnapshot(candles || []);
+    if (!snap) throw new Error("quote_unavailable");
+    const msgQ = `💹 قیمت لحظه‌ای
+
+نماد: ${symbol}
+TF: ${tf}
+قیمت: ${snap.lastPrice}
+تغییر: ${snap.changePct}%
+روند: ${snap.trend || "نامشخص"}`;
+    return tgSendMessage(env, chatId, msgQ, mainMenuKeyboard(env));
+  } catch (e) {
+    return tgSendMessage(env, chatId, `⚠️ قیمت لحظه‌ای برای ${symbol} در دسترس نیست. کمی بعد دوباره تلاش کن.`, mainMenuKeyboard(env));
+  }
+}
+
+async function sendNewsListMessage(env, chatId, userId, st, rawSymbol, rawLimit = 6) {
+  const symbol = String(rawSymbol || "").trim().toUpperCase();
+  if (!isSymbol(symbol)) {
+    st.state = "choose_symbol_for_news";
+    await saveUser(userId, st, env);
+    return tgSendMessage(env, chatId, "❌ نماد معتبر نیست. لطفاً یک نماد را برای اخبار انتخاب کن:", symbolPickerKeyboard());
+  }
+
+  let limit = Number(rawLimit);
+  if (!Number.isFinite(limit) || limit <= 0) limit = 6;
+  limit = Math.max(3, Math.min(10, Math.floor(limit)));
+
+  st.selectedSymbol = symbol;
+  st.state = "idle";
+  await saveUser(userId, st, env);
+
+  try {
+    const rows = await fetchSymbolNewsFa(symbol, limit, env);
+    const articles = (rows || []).slice(0, limit);
+    const lines = articles.map((x, i) => `${i + 1}) ${x.title || "-"}`).join("\n");
+    const listText = `📰 اخبار ${symbol}\n\n${lines || "خبری پیدا نشد."}\n\n💡 روی «تحلیل خبر» بزن تا همینجا تحلیل باز شود.`;
+    const nonce = makeNonce(10);
+    const keyb = buildBotNewsKeyboard(env, nonce, symbol, articles);
+    await saveBotNewsContext(env, symbol, articles, listText, keyb, 3600, nonce);
+    return tgSendMessage(env, chatId, listText, keyb);
+  } catch (e) {
+    return tgSendMessage(env, chatId, `⚠️ خبر مرتبط برای ${symbol} در دسترس نیست.`, mainMenuKeyboard(env));
+  }
 }
 
 async function handleCallbackQuery(cb, env) {
@@ -4786,67 +4854,29 @@ TxID پرداخت را همینجا بفرست (در صورت نیاز: <txid> <
 
     if (text === "/quote" || text === BTN.QUOTE || text.startsWith("/quote ")) {
       const arg = text.startsWith("/quote ") ? text.split(" ").slice(1).join(" ").trim() : "";
-      const symbol = String(arg || st.selectedSymbol || "BTCUSDT").toUpperCase();
-      const tf = String(st.timeframe || "H4").toUpperCase();
-      if (isSymbol(symbol)) { st.selectedSymbol = symbol; await saveUser(userId, st, env); }
-      try {
-        const candles = await getMarketCandlesWithFallback(env, symbol, tf);
-        const snap = computeSnapshot(candles || []);
-        if (!snap) throw new Error("quote_unavailable");
-        const msgQ = `💹 قیمت لحظه‌ای
+      const symbol = String(arg || "").toUpperCase();
+      if (symbol) return sendQuoteSnapshotMessage(env, chatId, userId, from, st, symbol);
 
-نماد: ${symbol}
-TF: ${tf}
-قیمت: ${snap.lastPrice}
-تغییر: ${snap.changePct}%
-روند: ${snap.trend || "نامشخص"}`;
-        return tgSendMessage(env, chatId, msgQ, mainMenuKeyboard(env));
-      } catch (e) {
-        return tgSendMessage(env, chatId, "⚠️ قیمت لحظه‌ای در دسترس نیست. کمی بعد دوباره تلاش کن.", mainMenuKeyboard(env));
-      }
+      st.state = "choose_symbol_for_quote";
+      await saveUser(userId, st, env);
+      return tgSendMessage(env, chatId, "💹 برای قیمت لحظه‌ای، نماد را انتخاب کن:", symbolPickerKeyboard());
     }
 
-    
-if (text === "/news" || text === BTN.NEWS || text.startsWith("/news ")) {
+    if (text === "/news" || text === BTN.NEWS || text.startsWith("/news ")) {
       const args = text.startsWith("/news ") ? text.split(" ").slice(1).filter(Boolean) : [];
-      const argSym = (args[0] || "").toString().trim().toUpperCase().replace(/\s+/g, "");
+      const argSym = String(args[0] || "").trim().toUpperCase().replace(/\s+/g, "");
       const argLimit = Number(args[1] || "");
-      let symbol = String(argSym || st.selectedSymbol || "BTCUSDT").toUpperCase();
-      if (!isSymbol(symbol)) symbol = String(st.selectedSymbol || "BTCUSDT").toUpperCase();
-      let limit = Number.isFinite(argLimit) && argLimit > 0 ? argLimit : 6;
-      limit = Math.max(3, Math.min(10, Math.floor(limit)));
+      if (argSym) return sendNewsListMessage(env, chatId, userId, st, argSym, argLimit);
 
-      if (argSym && isSymbol(argSym)) {
-        st.selectedSymbol = argSym;
-        await saveUser(userId, st, env);
-        symbol = argSym;
-      }
-
-      try {
-        const rows = await fetchSymbolNewsFa(symbol, limit, env);
-        const articles = (rows || []).slice(0, limit);
-        const lines = articles.map((x, i) => `${i + 1}) ${x.title || "-"}`).join("\n");
-        const listText = `📰 اخبار ${symbol}\n\n${lines || "خبری پیدا نشد."}\n\n💡 روی «تحلیل» بزن تا همینجا تحلیل باز شود.`;
-        const nonce = makeNonce(10);
-        const kb = buildBotNewsKeyboard(env, nonce, symbol, articles);
-        await saveBotNewsContext(env, symbol, articles, listText, kb, 3600, nonce);
-        return tgSendMessage(env, chatId, listText, kb);
-      } catch (e) {
-        return tgSendMessage(env, chatId, "⚠️ خبر مرتبط در دسترس نیست.", mainMenuKeyboard(env));
-      }
+      st.state = "choose_symbol_for_news";
+      await saveUser(userId, st, env);
+      return tgSendMessage(env, chatId, "📰 برای دیدن خبر، نماد را انتخاب کن:", symbolPickerKeyboard());
     }
 
     if (text === "/newsanalyze" || text === BTN.NEWS_ANALYSIS) {
-      const symbol = String(st.selectedSymbol || "BTCUSDT").toUpperCase();
-      try {
-        const rows = await fetchSymbolNewsFa(symbol, 5, env);
-        const summary = await buildNewsAnalysisSummary(symbol, rows || [], env);
-        return tgSendMessage(env, chatId, `🧠 تحلیل خبر ${symbol}
-
-${summary || "تحلیل خبری در دسترس نیست."}`, mainMenuKeyboard(env));
-      } catch (e) {
-        return tgSendMessage(env, chatId, "⚠️ تحلیل خبر در دسترس نیست.", mainMenuKeyboard(env));
-      }
+      st.state = "choose_symbol_for_news";
+      await saveUser(userId, st, env);
+      return tgSendMessage(env, chatId, "🧠 برای تحلیل خبر، نماد را انتخاب کن:", symbolPickerKeyboard());
     }
 
     if (text === "/miniapp" || text === BTN.MINIAPP) {
@@ -5181,6 +5211,14 @@ ${textClean}`);
       return tgSendMessage(env, chatId, "✅ درخواست شما ثبت شد. بعد از تایید ادمین، پرامپت اختصاصی فعال می‌شود.", mainMenuKeyboard(env));
     }
 
+
+    if (st.state === "choose_symbol_for_quote") {
+      return sendQuoteSnapshotMessage(env, chatId, userId, from, st, text);
+    }
+
+    if (st.state === "choose_symbol_for_news") {
+      return sendNewsListMessage(env, chatId, userId, st, text, 6);
+    }
 
     if (isSymbol(text)) {
       if (!st.profile?.name || !st.profile?.phone) {
