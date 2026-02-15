@@ -1754,11 +1754,22 @@ function normalizeStyleLabel(style) {
   const s = String(style || "").trim();
   if (!s) return "";
   const low = s.toLowerCase();
+  if (low === "پرایس اکشن" || low === "priceaction" || low === "price action") return "پرایس اکشن";
+  if (low === "پرایس‌اکشن" || low === "price-action") return "پرایس اکشن";
   if (low === "price action" || low === "priceaction") return "پرایس اکشن";
   if (low === "ict/smart money" || low === "ict smart money" || low === "smart money") return "ICT";
   if (low === "ict") return "ICT";
   if (low === "atr") return "ATR";
   return s;
+}
+
+function resolveSelectedStyle(st) {
+  const raw = String(st?.style || "").trim();
+  const normalized = normalizeStyleLabel(raw);
+  if (ALLOWED_STYLE_LIST.includes(normalized)) return normalized;
+  const pref = normalizeStyleLabel(st?.profile?.preferredStyle || "");
+  if (ALLOWED_STYLE_LIST.includes(pref)) return pref;
+  return "پرایس اکشن";
 }
 
 function getStyleGuide(style) {
@@ -1803,7 +1814,19 @@ function styleKey(style) {
 async function getStylePrompt(env, style) {
   const map = await getStylePromptMap(env);
   const key = normalizeStyleLabel(style);
-  return (map?.[styleKey(key)] || STYLE_PROMPTS_DEFAULT[key] || "").toString().trim();
+  const aliases = [
+    styleKey(key),
+    styleKey(style),
+    key,
+    style,
+    key === "ICT" ? "ict/smart money" : "",
+    key === "پرایس اکشن" ? "price action" : "",
+  ].filter(Boolean);
+  for (const k of aliases) {
+    const val = map?.[k];
+    if (typeof val === "string" && val.trim()) return val.trim();
+  }
+  return (STYLE_PROMPTS_DEFAULT[key] || STYLE_PROMPTS_DEFAULT["پرایس اکشن"] || "").toString().trim();
 }
 async function setStylePrompt(env, style, prompt) {
   if (!env.BOT_KV) return;
@@ -3141,6 +3164,7 @@ function assetKind(symbol) {
 
 function providerSupportsSymbol(provider, symbol, env) {
   const kind = assetKind(symbol);
+  if (provider === "tradingview") return !!String(env.TRADINGVIEW_HISTORY_URL || "").trim();
   if (provider === "binance") return kind === "crypto";
   if (provider === "nobitex") return kind === "crypto";
   if (provider === "kucoin") return kind === "crypto";
@@ -3729,6 +3753,7 @@ async function getMarketCandlesWithFallback(env, symbol, timeframe) {
     if (providerInCooldown(p)) continue;
     try {
       let candles = null;
+      if (p === "tradingview") candles = await fetchTradingViewCandles(symbol, tf, limit, timeoutMs, env);
       if (p === "binance") candles = await fetchBinanceCandles(symbol, tf, limit, timeoutMs);
       if (p === "nobitex") candles = await fetchNobitexCandles(symbol, tf, limit, timeoutMs);
       if (p === "kucoin") candles = await fetchKuCoinCandles(symbol, tf, limit, timeoutMs);
@@ -3811,6 +3836,7 @@ async function getMarketCandlesWithFallbackRaw(env, symbol, timeframe, timeoutMs
     if (providerInCooldown(p)) continue;
     try {
       let candles = null;
+      if (p === "tradingview") candles = await fetchTradingViewCandles(symbol, timeframe, limit, timeoutMs, env);
       if (p === "binance") candles = await fetchBinanceCandles(symbol, timeframe, limit, timeoutMs);
       if (p === "nobitex") candles = await fetchNobitexCandles(symbol, timeframe, limit, timeoutMs);
       if (p === "kucoin") candles = await fetchKuCoinCandles(symbol, timeframe, limit, timeoutMs);
@@ -4071,13 +4097,15 @@ function buildLocalFallbackAnalysis(symbol, st, candles, reason = "") {
 /* ========================== TEXT BUILDERS ========================== */
 async function buildTextPromptForSymbol(symbol, userPrompt, st, marketBlock, env, newsBlock = "") {
   const tf = st.timeframe || "H4";
-  const sp = await getStylePrompt(env, st.style);
+  const activeStyle = resolveSelectedStyle(st);
+  st.style = activeStyle;
+  const sp = await getStylePrompt(env, activeStyle);
   const needBase = String(st.promptMode || "").trim() !== "style_only";
   const baseRaw = needBase ? await getAnalysisPrompt(env) : "";
   const newsAnalysisBlock = (newsBlock && String(st.promptMode||'').trim() !== 'style_only') ? await buildNewsAnalysisSummary(symbol, parseNewsBlockRows(newsBlock), env) : "";
   const base = baseRaw
      .split("{TIMEFRAME}").join(tf)
-     .split("{STYLE}").join(st.style || "")
+     .split("{STYLE}").join(activeStyle)
      .split("{RISK}").join(st.risk || "")
      .split("{NEWS}").join(st.newsEnabled ? "on" : "off");
 
@@ -4096,7 +4124,7 @@ async function buildTextPromptForSymbol(symbol, userPrompt, st, marketBlock, env
     const payload = {
       symbol: String(symbol || "").toUpperCase(),
       timeframe: tf,
-      style: st.style || "",
+      style: activeStyle,
       risk: st.risk || "متوسط",
       capital: capObj,
       marketData: marketBlock || "",
