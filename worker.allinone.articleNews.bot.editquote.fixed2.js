@@ -2836,6 +2836,7 @@ async function runTextProviders(prompt, env, orderOverride) {
 }
 
 async function runPolishProviders(draft, env, orderOverride) {
+  if (String(env.ENABLE_POLISH || "0") !== "1") return draft;
   const raw = (orderOverride || env.POLISH_PROVIDER_ORDER || "").toString().trim();
   if (!raw) return draft;
 
@@ -2896,12 +2897,13 @@ async function runVisionProviders(imageUrl, visionPrompt, env, orderOverride) {
 
 async function textProvider(name, prompt, env) {
   name = String(name || "").toLowerCase();
+  const textMaxTokens = Math.max(1200, Number(env.TEXT_MAX_TOKENS || 2800));
 
   if (name === "cf") {
     if (!env.AI) throw new Error("AI_binding_missing");
     const out = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
       messages: [{ role: "user", content: prompt }],
-      max_tokens: 900,
+      max_tokens: textMaxTokens,
       temperature: 0,
     });
     return out?.response || out?.result || "";
@@ -2928,6 +2930,7 @@ async function textProvider(name, prompt, env) {
         body: JSON.stringify({
           model: env.OPENAI_MODEL || "gpt-5",
           messages: [{ role: "user", content: prompt }],
+          max_completion_tokens: textMaxTokens,
           temperature: 0,
         }),
       }, TIMEOUT_TEXT_MS);
@@ -2957,6 +2960,7 @@ async function textProvider(name, prompt, env) {
       body: JSON.stringify({
         model: env.OPENROUTER_MODEL || "openai/gpt-4o-mini",
         messages: [{ role: "user", content: prompt }],
+        max_tokens: textMaxTokens,
         temperature: 0,
       }),
     }, TIMEOUT_TEXT_MS);
@@ -2976,6 +2980,7 @@ async function textProvider(name, prompt, env) {
       body: JSON.stringify({
         model: env.DEEPSEEK_MODEL || "deepseek-chat",
         messages: [{ role: "user", content: prompt }],
+        max_tokens: textMaxTokens,
         temperature: 0,
       }),
     }, TIMEOUT_TEXT_MS);
@@ -2993,7 +2998,7 @@ async function textProvider(name, prompt, env) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0, maxOutputTokens: 900 },
+          generationConfig: { temperature: 0, maxOutputTokens: textMaxTokens },
         }),
       },
       TIMEOUT_TEXT_MS
@@ -3130,16 +3135,22 @@ function assetKind(symbol) {
   if (/^[A-Z]{6}$/.test(symbol)) return "forex";
   if (symbol === "XAUUSD" || symbol === "XAGUSD") return "metal";
   if (symbol === "DJI" || symbol === "NDX" || symbol === "SPX") return "index";
+  if (/^[A-Z][A-Z0-9.]{0,9}$/.test(String(symbol || "").toUpperCase())) return "stock";
   return "unknown";
 }
 
 function providerSupportsSymbol(provider, symbol, env) {
   const kind = assetKind(symbol);
   if (provider === "binance") return kind === "crypto";
-  if (provider === "twelvedata") return !!(env.TWELVEDATA_API_KEY || env.TWELVEDATA_API_KEYS) && ["crypto", "forex", "metal"].includes(kind);
-  if (provider === "alphavantage") return !!(env.ALPHAVANTAGE_API_KEY || env.ALPHAVANTAGE_API_KEYS) && ["forex", "metal"].includes(kind);
-  if (provider === "finnhub") return !!(env.FINNHUB_API_KEY || env.FINNHUB_API_KEYS) && kind === "forex";
+  if (provider === "nobitex") return kind === "crypto";
+  if (provider === "kucoin") return kind === "crypto";
+  if (provider === "bybit") return kind === "crypto";
+  if (provider === "coingecko") return kind === "crypto";
+  if (provider === "twelvedata") return !!(env.TWELVEDATA_API_KEY || env.TWELVEDATA_API_KEYS) && ["crypto", "forex", "metal", "index", "stock"].includes(kind);
+  if (provider === "alphavantage") return !!(env.ALPHAVANTAGE_API_KEY || env.ALPHAVANTAGE_API_KEYS) && ["forex", "metal", "stock"].includes(kind);
+  if (provider === "finnhub") return !!(env.FINNHUB_API_KEY || env.FINNHUB_API_KEYS) && ["forex", "metal", "index", "stock"].includes(kind);
   if (provider === "cryptocompare") return ["crypto"].includes(kind);
+  if (provider === "stooq") return ["forex", "metal", "index", "stock"].includes(kind);
   if (provider === "yahoo") return true;
   return true;
 }
@@ -3175,10 +3186,20 @@ function pickApiKey(pool, seed) {
 }
 
 function resolveMarketProviderChain(env, symbol, timeframe = "H4") {
-  const desired = parseOrder(env.MARKET_DATA_PROVIDER_ORDER, ["binance","cryptocompare","twelvedata","alphavantage","finnhub","yahoo"]);
+  const kind = assetKind(symbol);
+  const defaultsByKind = {
+    crypto: ["binance", "nobitex", "kucoin", "bybit", "coingecko", "cryptocompare", "yahoo"],
+    forex: ["twelvedata", "finnhub", "alphavantage", "stooq", "yahoo"],
+    metal: ["twelvedata", "finnhub", "alphavantage", "stooq", "yahoo"],
+    index: ["twelvedata", "finnhub", "alphavantage", "stooq", "yahoo"],
+    stock: ["finnhub", "twelvedata", "alphavantage", "stooq", "yahoo"],
+    unknown: ["yahoo"],
+  };
+  const fallback = defaultsByKind[kind] || defaultsByKind.unknown;
+  const desired = parseOrder(env.MARKET_DATA_PROVIDER_ORDER, fallback);
   const filtered = desired.filter((p) => providerSupportsSymbol(p, symbol, env));
   const chain = filtered.length ? filtered : ["yahoo"];
-  return rotateBySeed(chain, `${symbol}|${timeframe}`);
+  return chain;
 }
 
 
@@ -3443,6 +3464,164 @@ async function fetchCryptoCompareCandles(symbol, timeframe, limit, timeoutMs, en
   return candles.slice(-limit);
 }
 
+async function fetchKuCoinCandles(symbol, timeframe, limit, timeoutMs) {
+  if (!symbol.endsWith("USDT")) throw new Error("kucoin_not_crypto");
+  const tf = String(timeframe || "H4").toUpperCase();
+  const m = { M15: "15min", H1: "1hour", H4: "4hour", D1: "1day" };
+  const type = m[tf] || "4hour";
+  const pair = `${symbol.slice(0, -4)}-USDT`;
+  const url = `https://api.kucoin.com/api/v1/market/candles?symbol=${encodeURIComponent(pair)}&type=${encodeURIComponent(type)}`;
+  const r = await fetchWithTimeout(url, { headers: { "User-Agent": "Mozilla/5.0" } }, timeoutMs);
+  if (!r.ok) throw new Error(`kucoin_http_${r.status}`);
+  const j = await r.json().catch(() => null);
+  const rows = Array.isArray(j?.data) ? j.data : [];
+  if (!rows.length) throw new Error("kucoin_no_data");
+  const candles = rows.map((x) => ({
+    t: Number(x?.[0]) * 1000,
+    o: Number(x?.[1]),
+    c: Number(x?.[2]),
+    h: Number(x?.[3]),
+    l: Number(x?.[4]),
+    v: Number(x?.[5]),
+  })).filter((x) => Number.isFinite(x.c)).sort((a, b) => a.t - b.t);
+  return candles.slice(-limit);
+}
+
+async function fetchBybitCandles(symbol, timeframe, limit, timeoutMs) {
+  if (!symbol.endsWith("USDT")) throw new Error("bybit_not_crypto");
+  const tf = String(timeframe || "H4").toUpperCase();
+  const m = { M15: "15", H1: "60", H4: "240", D1: "D" };
+  const interval = m[tf] || "240";
+  const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&limit=${Math.min(200, Math.max(30, Number(limit || 120)))}`;
+  const r = await fetchWithTimeout(url, { headers: { "User-Agent": "Mozilla/5.0" } }, timeoutMs);
+  if (!r.ok) throw new Error(`bybit_http_${r.status}`);
+  const j = await r.json().catch(() => null);
+  const rows = Array.isArray(j?.result?.list) ? j.result.list : [];
+  if (!rows.length) throw new Error("bybit_no_data");
+  const candles = rows.map((x) => ({
+    t: Number(x?.[0]),
+    o: Number(x?.[1]),
+    h: Number(x?.[2]),
+    l: Number(x?.[3]),
+    c: Number(x?.[4]),
+    v: Number(x?.[5]),
+  })).filter((x) => Number.isFinite(x.c)).sort((a, b) => a.t - b.t);
+  return candles.slice(-limit);
+}
+
+async function fetchNobitexCandles(symbol, timeframe, limit, timeoutMs) {
+  if (!symbol.endsWith("USDT")) throw new Error("nobitex_not_crypto");
+  const tf = String(timeframe || "H4").toUpperCase();
+  const m = { M15: "15", H1: "60", H4: "240", D1: "D" };
+  const resolution = m[tf] || "240";
+  const base = symbol.slice(0, -4).toLowerCase();
+  const now = Math.floor(Date.now() / 1000);
+  const stepSec = tf === "M15" ? 900 : tf === "H1" ? 3600 : tf === "H4" ? 14400 : 86400;
+  const from = now - stepSec * Math.max(100, Number(limit || 120) * 2);
+  const urls = [
+    `https://api.nobitex.ir/market/udf/history?symbol=${encodeURIComponent(base + "usdt")}&resolution=${encodeURIComponent(resolution)}&from=${from}&to=${now}`,
+    `https://api.nobitex.ir/market/udf/history?symbol=${encodeURIComponent(base + "irt")}&resolution=${encodeURIComponent(resolution)}&from=${from}&to=${now}`,
+  ];
+  let lastErr = null;
+  for (const url of urls) {
+    try {
+      const r = await fetchWithTimeout(url, { headers: { "User-Agent": "Mozilla/5.0" } }, timeoutMs);
+      if (!r.ok) throw new Error(`nobitex_http_${r.status}`);
+      const j = await r.json().catch(() => null);
+      const t = Array.isArray(j?.t) ? j.t : [];
+      const o = Array.isArray(j?.o) ? j.o : [];
+      const h = Array.isArray(j?.h) ? j.h : [];
+      const l = Array.isArray(j?.l) ? j.l : [];
+      const c = Array.isArray(j?.c) ? j.c : [];
+      if (!t.length || !c.length) throw new Error("nobitex_no_data");
+      const candles = t.map((x, i) => ({
+        t: Number(x) * 1000,
+        o: Number(o[i]),
+        h: Number(h[i]),
+        l: Number(l[i]),
+        c: Number(c[i]),
+        v: null,
+      })).filter((x) => Number.isFinite(x.c));
+      if (!candles.length) throw new Error("nobitex_empty");
+      return candles.slice(-limit);
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error("nobitex_failed");
+}
+
+function mapSymbolToCoinGeckoId(symbol) {
+  const base = String(symbol || "").toUpperCase().replace(/USDT$/, "");
+  const map = {
+    BTC: "bitcoin", ETH: "ethereum", BNB: "binancecoin", SOL: "solana", XRP: "ripple",
+    ADA: "cardano", DOGE: "dogecoin", TRX: "tron", TON: "the-open-network", LTC: "litecoin",
+    DOT: "polkadot", AVAX: "avalanche-2", SHIB: "shiba-inu", MATIC: "matic-network",
+  };
+  return map[base] || "";
+}
+
+async function fetchCoinGeckoCandles(symbol, timeframe, limit, timeoutMs) {
+  if (!symbol.endsWith("USDT")) throw new Error("coingecko_not_crypto");
+  const id = mapSymbolToCoinGeckoId(symbol);
+  if (!id) throw new Error("coingecko_symbol_unsupported");
+  const tf = String(timeframe || "H4").toUpperCase();
+  const days = tf === "D1" ? "365" : (tf === "H4" ? "90" : "30");
+  const url = `https://api.coingecko.com/api/v3/coins/${encodeURIComponent(id)}/ohlc?vs_currency=usd&days=${encodeURIComponent(days)}`;
+  const r = await fetchWithTimeout(url, { headers: { "Accept": "application/json" } }, timeoutMs);
+  if (!r.ok) throw new Error(`coingecko_http_${r.status}`);
+  const rows = await r.json().catch(() => null);
+  if (!Array.isArray(rows) || !rows.length) throw new Error("coingecko_no_data");
+  let candles = rows.map((x) => ({
+    t: Number(x?.[0]),
+    o: Number(x?.[1]),
+    h: Number(x?.[2]),
+    l: Number(x?.[3]),
+    c: Number(x?.[4]),
+    v: null,
+  })).filter((x) => Number.isFinite(x.c));
+  if (tf === "H4") candles = downsampleCandles(candles, 4);
+  if (tf === "D1") candles = downsampleCandles(candles, 24);
+  return candles.slice(-limit);
+}
+
+function stooqSymbol(symbol) {
+  const s = String(symbol || "").toUpperCase();
+  if (/^[A-Z]{6}$/.test(s)) return s.toLowerCase();
+  if (s === "XAUUSD") return "xauusd";
+  if (s === "XAGUSD") return "xagusd";
+  if (s === "DJI") return "^dji";
+  if (s === "NDX") return "^ndq";
+  if (s === "SPX") return "^spx";
+  return s.toLowerCase();
+}
+
+async function fetchStooqCandles(symbol, timeframe, limit, timeoutMs) {
+  const tf = String(timeframe || "H4").toUpperCase();
+  const interval = tf === "D1" ? "d" : "60";
+  const code = stooqSymbol(symbol);
+  const url = `https://stooq.com/q/d/l/?s=${encodeURIComponent(code)}&i=${encodeURIComponent(interval)}`;
+  const r = await fetchWithTimeout(url, { headers: { "User-Agent": "Mozilla/5.0" } }, timeoutMs);
+  if (!r.ok) throw new Error(`stooq_http_${r.status}`);
+  const csv = await r.text();
+  const lines = String(csv || "").trim().split(/\r?\n/).slice(1);
+  const rows = [];
+  for (const line of lines) {
+    const p = line.split(",");
+    if (p.length < 5) continue;
+    const t = Date.parse((p[0] || "") + "T00:00:00Z");
+    const o = Number(p[1]);
+    const h = Number(p[2]);
+    const l = Number(p[3]);
+    const c = Number(p[4]);
+    const v = p[5] != null ? Number(p[5]) : null;
+    if (!Number.isFinite(t) || !Number.isFinite(c)) continue;
+    rows.push({ t, o, h, l, c, v });
+  }
+  if (!rows.length) throw new Error("stooq_no_data");
+  return rows.slice(-limit);
+}
+
 async function fetchYahooChartCandles(symbol, timeframe, limit, timeoutMs) {
   // Yahoo can intermittently return 404 from some edges / for some symbols.
   // We try multiple hosts + richer headers, and we keep H4 as 60m + downsample.
@@ -3551,10 +3730,15 @@ async function getMarketCandlesWithFallback(env, symbol, timeframe) {
     try {
       let candles = null;
       if (p === "binance") candles = await fetchBinanceCandles(symbol, tf, limit, timeoutMs);
+      if (p === "nobitex") candles = await fetchNobitexCandles(symbol, tf, limit, timeoutMs);
+      if (p === "kucoin") candles = await fetchKuCoinCandles(symbol, tf, limit, timeoutMs);
+      if (p === "bybit") candles = await fetchBybitCandles(symbol, tf, limit, timeoutMs);
+      if (p === "coingecko") candles = await fetchCoinGeckoCandles(symbol, tf, limit, timeoutMs);
       if (p === "cryptocompare") candles = await fetchCryptoCompareCandles(symbol, tf, limit, timeoutMs, env);
       if (p === "twelvedata") candles = await fetchTwelveDataCandles(symbol, tf, limit, timeoutMs, env);
       if (p === "alphavantage") candles = await fetchAlphaVantageFxIntraday(symbol, tf, limit, timeoutMs, env);
       if (p === "finnhub") candles = await fetchFinnhubForexCandles(symbol, tf, limit, timeoutMs, env);
+      if (p === "stooq") candles = await fetchStooqCandles(symbol, tf, limit, timeoutMs);
       if (p === "yahoo") candles = await fetchYahooChartCandles(symbol, tf, limit, timeoutMs);
       if (Array.isArray(candles) && candles.length) {
         await setMarketCache(env, cacheKey, candles);
@@ -3628,10 +3812,15 @@ async function getMarketCandlesWithFallbackRaw(env, symbol, timeframe, timeoutMs
     try {
       let candles = null;
       if (p === "binance") candles = await fetchBinanceCandles(symbol, timeframe, limit, timeoutMs);
+      if (p === "nobitex") candles = await fetchNobitexCandles(symbol, timeframe, limit, timeoutMs);
+      if (p === "kucoin") candles = await fetchKuCoinCandles(symbol, timeframe, limit, timeoutMs);
+      if (p === "bybit") candles = await fetchBybitCandles(symbol, timeframe, limit, timeoutMs);
+      if (p === "coingecko") candles = await fetchCoinGeckoCandles(symbol, timeframe, limit, timeoutMs);
       if (p === "cryptocompare") candles = await fetchCryptoCompareCandles(symbol, timeframe, limit, timeoutMs, env);
       if (p === "twelvedata") candles = await fetchTwelveDataCandles(symbol, timeframe, limit, timeoutMs, env);
       if (p === "alphavantage") candles = await fetchAlphaVantageFxIntraday(symbol, timeframe, limit, timeoutMs, env);
       if (p === "finnhub") candles = await fetchFinnhubForexCandles(symbol, timeframe, limit, timeoutMs, env);
+      if (p === "stooq") candles = await fetchStooqCandles(symbol, timeframe, limit, timeoutMs);
       if (p === "yahoo") candles = await fetchYahooChartCandles(symbol, timeframe, limit, timeoutMs);
       if (Array.isArray(candles) && candles.length) {
         await setMarketCache(env, cacheKey, candles);
