@@ -971,7 +971,7 @@ const MINIAPP_EXEC_CHECKLIST_TEXT = [
   "✅ Worker با RootPath درست Deploy شده باشد (مثلاً /bot)",
   "✅ WEB_ADMIN_TOKEN/WEB_OWNER_TOKEN فقط برای وب (خارج تلگرام) است",
   "✅ داخل تلگرام Mini App باید initData داشته باشد",
-].join("\n");
+].join("\\n");
 
 const BOT_NAME = "MarketiQ";
 const WELCOME_BOT =
@@ -4875,11 +4875,48 @@ ${textClean}`);
       }
 
       st.selectedSymbol = text;
+      st.state = "await_analysis_tf";
+      await saveUser(userId, st, env);
+
+      return tgSendMessage(
+        env,
+        chatId,
+        `✅ نماد: ${st.selectedSymbol}\n\n⏱ لطفاً تایم‌فریم تحلیل را انتخاب کن:`,
+        optionsKeyboard(["M15","H1","H4","D1"])
+      );
+    }
+
+    if (st.state === "await_analysis_tf" && st.selectedSymbol) {
+      const tf = String(text || "").trim().toUpperCase();
+      const allowedTf = ["M15", "H1", "H4", "D1"];
+      if (!allowedTf.includes(tf)) {
+        return tgSendMessage(env, chatId, "⛔️ تایم‌فریم نامعتبر است. یکی از گزینه‌ها را انتخاب کن.", optionsKeyboard(allowedTf));
+      }
+      st.timeframe = tf;
+      st.state = "await_analysis_style";
+      await saveUser(userId, st, env);
+      const styles = await getStyleList(env);
+      return tgSendMessage(env, chatId, `✅ تایم‌فریم: ${st.timeframe}\n\n🎯 حالا سبک تحلیل را انتخاب کن:`, optionsKeyboard(styles));
+    }
+
+    if (st.state === "await_analysis_style" && st.selectedSymbol) {
+      const styles = await getStyleList(env);
+      const picked = normalizeStyleLabel(text);
+      const normalizedAllowed = styles.map((s) => normalizeStyleLabel(s));
+      if (!normalizedAllowed.includes(picked)) {
+        return tgSendMessage(env, chatId, "⛔️ سبک نامعتبر است. یکی از سبک‌های لیست را انتخاب کن.", optionsKeyboard(styles));
+      }
+      st.style = picked;
       st.state = "await_prompt";
       await saveUser(userId, st, env);
 
       const quota = isStaff(from, env) ? "∞" : `${st.dailyUsed}/${dailyLimit(env, st)}`;
-      return tgSendMessage(env, chatId, `✅ نماد: ${st.selectedSymbol}\n\nبرای شروع تحلیل روی «${BTN.ANALYZE}» بزن.\n\nسهمیه امروز: ${quota}`, kb([[BTN.ANALYZE], [BTN.BACK, BTN.HOME]]));
+      return tgSendMessage(
+        env,
+        chatId,
+        `✅ آماده تحلیل\nنماد: ${st.selectedSymbol}\nتایم‌فریم: ${st.timeframe}\nسبک: ${st.style}\n\nبرای شروع تحلیل روی «${BTN.ANALYZE}» بزن.\n\nسهمیه امروز: ${quota}`,
+        kb([[BTN.ANALYZE], [BTN.BACK, BTN.HOME]])
+      );
     }
 
     if (st.state === "await_prompt" && st.selectedSymbol) {
@@ -6941,7 +6978,7 @@ function prettyErr(j, status){
   if (status === 403 && String(e) === "forbidden") return "دسترسی این بخش برای نقش فعلی شما مجاز نیست.";
   if (status === 401) {
     if (String(e).includes("initData")) return "اتصال مینی‌اپ منقضی شده؛ اپ را مجدد از داخل تلگرام باز کنید.";
-    return "احراز هویت تلگرام ناموفق است.\n\n" + MINIAPP_EXEC_CHECKLIST_TEXT;
+    return "احراز هویت تلگرام ناموفق است.\\n\\n" + MINIAPP_EXEC_CHECKLIST_TEXT;
   }
   return "مشکلی پیش آمد. لطفاً دوباره تلاش کنید.";
 }
@@ -7571,7 +7608,7 @@ async function boot(){
       pillTxt.textContent = "Offline (Guest)";
       out.textContent = "حالت محدود فعال شد ✅ داده‌های پایه بارگذاری شدند.";
       showToast("حالت محدود", "برای همه امکانات، مینی‌اپ را از داخل تلگرام باز کنید.", "GUEST", false);
-      if (status === 401) out.textContent = "اتصال کامل برقرار نشد.\n\n" + MINIAPP_EXEC_CHECKLIST_TEXT;
+      if (status === 401) out.textContent = "اتصال کامل برقرار نشد.\\n\\n" + MINIAPP_EXEC_CHECKLIST_TEXT;
       setupLiveQuotePolling();
       setupNewsPolling();
       return;
@@ -8236,14 +8273,14 @@ async function runDailySuggestions(env) {
       ? articles.slice(0, 2).map((x, i) => `${i + 1}) ${x?.title || ""}`).join(String.fromCharCode(10))
       : "";
     const newsLine = newsBlock
-      ? ("\n\n📰 خبر مرتبط " + symbol + ":\n" + newsBlock)
-      : "\n\n📰 فعلاً خبر مرتبطی برای این نماد پیدا نشد.";
+      ? ("\\n\\n📰 خبر مرتبط " + symbol + ":\\n" + newsBlock)
+      : "\\n\\n📰 فعلاً خبر مرتبطی برای این نماد پیدا نشد.";
     const newsSummary = await buildNewsAnalysisSummary(symbol, articles, env);
     const msg =
-      "🔔 نوتیف تحلیلی روزانه (۱/۲ یا ۲/۲)\n" +
+      "🔔 نوتیف تحلیلی روزانه (۱/۲ یا ۲/۲)\\n" +
       "بر اساس پروفایل شما (" + market + " / " + style + cap + ")، برای " + symbol + " امروز ۲ تحلیل برنامه‌ریزی کن: یکی روندی، یکی برگشتی." +
       newsLine +
-      "\n\n🧠 جمع‌بندی خبری:\n" + String(newsSummary || "-");
+      "\\n\\n🧠 جمع‌بندی خبری:\\n" + String(newsSummary || "-");
     await tgSendMessage(env, Number(u.userId), msg, mainMenuKeyboard(env));
   }
 }
