@@ -1,12 +1,9 @@
 export default {
   async fetch(request, env, ctx) {
-      validateRotationConfig(env);
-
     try {
       const url = new URL(request.url);
-      url.pathname = normalizeWorkerPath(url.pathname);
 
-      if (url.pathname === "/health") return new Response("ok", { status: 200 });
+      if (pathEndsWith(url.pathname, "/health")) return new Response("ok", { status: 200 });
 
       // ===== MINI APP (inline) =====
       // Serve app.js from root and nested miniapp paths (e.g. /miniapp/app.js)
@@ -17,21 +14,20 @@ export default {
       if (
         request.method === "GET" &&
         url.pathname !== "/health" &&
-        !url.pathname.startsWith("/api/") &&
-        !url.pathname.startsWith("/telegram/") &&
+        !pathIncludes(url.pathname, "/api/") &&
+        !pathIncludes(url.pathname, "/telegram/") &&
         !url.pathname.endsWith(".js")
       ) {
-        return htmlResponse(injectMiniappConfig(MINI_APP_HTML, env, url));
+        return htmlResponse(MINI_APP_HTML);
       }
 
       // ===== MINI APP APIs =====
-      if (url.pathname === "/api/user" && request.method === "POST") {
+      if (pathEndsWith(url.pathname, "/api/user") && request.method === "POST") {
         const body = await request.json().catch(() => null);
         if (!body) return jsonResponse({ ok: false, error: "bad_json" }, 400);
         const v = await verifyMiniappAuth(body, env);
         if (!v.ok) {
-          const wantGuest = !!body?.allowGuest;
-          if (wantGuest || miniappGuestEnabled(env)) {
+          if (miniappGuestEnabled(env)) {
             return jsonResponse(await buildMiniappGuestPayload(env));
           }
           return jsonResponse({ ok: false, error: v.reason }, 401);
@@ -40,7 +36,7 @@ export default {
         const st = await ensureUser(v.userId, env, v.fromLike);
         applyLocaleFromTelegramUser(st, v.fromLike || {});
         if (env.BOT_KV) await saveUser(v.userId, st, env);
-        const quota = isStaff(v.fromLike, env) ? "∞" : `${st.dailyUsed}/${dailyLimit(env, st)}`;
+        const quota = isStaff(v.fromLike, env) ? "∞" : `points:${Number(st.points?.balance || 0)}`;
         const symbols = [...MAJORS, ...METALS, ...INDICES, ...CRYPTOS];
         const miniToken = await issueMiniappToken(env, v.userId, v.fromLike || {});
         const styles = await getStyleList(env);
@@ -71,7 +67,7 @@ export default {
         });
       }
 
-      if (url.pathname === "/api/settings" && request.method === "POST") {
+      if (pathEndsWith(url.pathname, "/api/settings") && request.method === "POST") {
         const body = await request.json().catch(() => null);
         if (!body) return jsonResponse({ ok: false, error: "bad_json" }, 400);
 
@@ -126,60 +122,8 @@ export default {
         if (!v.ok) return jsonResponse({ ok: false, error: v.reason }, 401);
         if (!isStaff(v.fromLike, env)) return jsonResponse({ ok: false, error: "forbidden" }, 403);
 
-
-// Rotation admin endpoints (owner-only)
-if (url.pathname === "/api/admin/rotation/snapshot") {
-  if (!isOwner(v.fromLike, env)) return jsonResponse({ ok: false, error: "forbidden" }, 403);
-
-  const kv = getRotationKV(env);
-  const services = [
-    "openai", "openrouter", "deepseek", "gemini",
-    "openai_vision", "gemini_vision", "hf_vision",
-    "binance", "twelvedata", "alphavantage", "finnhub", "yahoo",
-    "news", "blockchain", "quickchart",
-  ];
-
-  const snapshots = {};
-  for (const s of services) {
-    let kvSnap = null;
-    if (kv) {
-      const raw = await kv.get(`rot:${s}`).catch(() => null);
-      kvSnap = raw ? safeJsonParse(raw) : null;
-    }
-    snapshots[s] = kvSnap || null;
-  }
-
-  return jsonResponse({ ok: true, snapshots }, 200);
-}
-
-if (url.pathname === "/api/admin/rotation/reset") {
-  if (!isOwner(v.fromLike, env)) return jsonResponse({ ok: false, error: "forbidden" }, 403);
-
-  const kv = getRotationKV(env);
-  if (!kv) return jsonResponse({ ok: false, error: "kv_missing" }, 400);
-
-  const body = await request.json().catch(() => ({}));
-  const target = String(body?.serviceName || body?.service || body?.target || "").toLowerCase();
-  const services = [
-    "openai", "openrouter", "deepseek", "gemini",
-    "openai_vision", "gemini_vision", "hf_vision",
-    "binance", "twelvedata", "alphavantage", "finnhub", "yahoo",
-    "news", "blockchain", "quickchart",
-  ];
-  const list = target && target !== "all" ? [target] : services;
-
-  for (const s of list) {
-    await kv.delete(`rot:${s}`).catch(() => {});
-  }
-  // reset in-memory cache too
-  if (globalThis.__ROTATION_POOLS__) globalThis.__ROTATION_POOLS__.clear();
-
-  return jsonResponse({ ok: true, reset: list }, 200);
-}
-
-
-        if (url.pathname === "/api/admin/bootstrap") {
-          const [prompt, styles, commission, offerBanner, offerBannerImage, payments, stylePrompts, customPrompts, freeDailyLimit, withdrawals, tickets, adminFlags, welcomeBot, welcomeMiniapp] = await Promise.all([
+        if (pathEndsWith(url.pathname, "/api/admin/bootstrap")) {
+          const [prompt, styles, commission, offerBanner, offerBannerImage, payments, stylePrompts, customPrompts, freeDailyLimit, basePoints, withdrawals, tickets, adminFlags, welcomeBot, welcomeMiniapp] = await Promise.all([
             getAnalysisPrompt(env),
             getStyleList(env),
             getCommissionSettings(env),
@@ -189,22 +133,23 @@ if (url.pathname === "/api/admin/rotation/reset") {
             getStylePromptMap(env),
             getCustomPrompts(env),
             getFreeDailyLimit(env),
+            getBasePoints(env),
             listWithdrawals(env, 100),
             listSupportTickets(env, 100),
             getAdminFlags(env),
             getBotWelcomeText(env),
             getMiniappWelcomeText(env),
           ]);
-          return jsonResponse({ ok: true, prompt, styles, commission, offerBanner, offerBannerImage, payments, stylePrompts, customPrompts, freeDailyLimit, withdrawals, tickets, adminFlags, welcomeBot, welcomeMiniapp });
+          return jsonResponse({ ok: true, prompt, styles, commission, offerBanner, offerBannerImage, payments, stylePrompts, customPrompts, freeDailyLimit, basePoints, withdrawals, tickets, adminFlags, welcomeBot, welcomeMiniapp });
         }
 
-        if (url.pathname === "/api/admin/welcome") {
+        if (pathEndsWith(url.pathname, "/api/admin/welcome")) {
           if (typeof body.welcomeBot === "string") await setBotWelcomeText(env, body.welcomeBot);
           if (typeof body.welcomeMiniapp === "string") await setMiniappWelcomeText(env, body.welcomeMiniapp);
           return jsonResponse({ ok: true, welcomeBot: await getBotWelcomeText(env), welcomeMiniapp: await getMiniappWelcomeText(env) });
         }
 
-        if (url.pathname === "/api/admin/wallet") {
+        if (pathEndsWith(url.pathname, "/api/admin/wallet")) {
           if (!isOwner(v.fromLike, env)) return jsonResponse({ ok: false, error: "forbidden" }, 403);
           if (!env.BOT_KV) return jsonResponse({ ok: false, error: "bot_kv_missing" }, 500);
           const wallet = typeof body.wallet === "string" ? body.wallet.trim() : null;
@@ -214,13 +159,13 @@ if (url.pathname === "/api/admin/rotation/reset") {
           return jsonResponse({ ok: true, wallet: await getWallet(env) });
         }
 
-        if (url.pathname === "/api/admin/tickets/list") {
+        if (pathEndsWith(url.pathname, "/api/admin/tickets/list")) {
           const limit = Math.min(300, Math.max(1, Number(body.limit || 100)));
           const tickets = await listSupportTickets(env, limit);
           return jsonResponse({ ok: true, tickets });
         }
 
-        if (url.pathname === "/api/admin/tickets/update") {
+        if (pathEndsWith(url.pathname, "/api/admin/tickets/update")) {
           const id = String(body.id || "").trim();
           const status = String(body.status || "").trim();
           const reply = String(body.reply || "").trim();
@@ -260,7 +205,7 @@ ${reply}`;
           return jsonResponse({ ok: true, ticket: updated });
         }
 
-        if (url.pathname === "/api/admin/prompt") {
+        if (pathEndsWith(url.pathname, "/api/admin/prompt")) {
           if (typeof body.prompt === "string" && env.BOT_KV) {
             await env.BOT_KV.put("settings:analysis_prompt", body.prompt.trim());
           }
@@ -268,7 +213,7 @@ ${reply}`;
           return jsonResponse({ ok: true, prompt });
         }
 
-        if (url.pathname === "/api/admin/styles") {
+        if (pathEndsWith(url.pathname, "/api/admin/styles")) {
           const list = await getStyleList(env);
           const action = String(body.action || "");
           const style = String(body.style || "").trim();
@@ -282,7 +227,7 @@ ${reply}`;
           return jsonResponse({ ok: true, styles: await getStyleList(env) });
         }
 
-        if (url.pathname === "/api/admin/style-prompts") {
+        if (pathEndsWith(url.pathname, "/api/admin/style-prompts")) {
           const map = await getStylePromptMap(env);
           if (typeof body.stylePrompts === "object" && body.stylePrompts) {
             await setStylePromptMap(env, body.stylePrompts);
@@ -290,20 +235,27 @@ ${reply}`;
           return jsonResponse({ ok: true, stylePrompts: await getStylePromptMap(env) });
         }
 
-        if (url.pathname === "/api/admin/custom-prompts") {
+        if (pathEndsWith(url.pathname, "/api/admin/custom-prompts")) {
           if (Array.isArray(body.customPrompts)) {
             await setCustomPrompts(env, body.customPrompts);
           }
           return jsonResponse({ ok: true, customPrompts: await getCustomPrompts(env) });
         }
 
-        if (url.pathname === "/api/admin/free-limit") {
+        if (pathEndsWith(url.pathname, "/api/admin/free-limit")) {
           const limit = toInt(body.limit, 3);
           await setFreeDailyLimit(env, limit);
           return jsonResponse({ ok: true, freeDailyLimit: await getFreeDailyLimit(env) });
         }
 
-        if (url.pathname === "/api/admin/features") {
+        if (pathEndsWith(url.pathname, "/api/admin/points/base")) {
+          const points = toInt(body.basePoints, 0);
+          await setBasePoints(env, points);
+          return jsonResponse({ ok: true, basePoints: await getBasePoints(env) });
+        }
+
+
+        if (pathEndsWith(url.pathname, "/api/admin/features")) {
           if (!isOwner(v.fromLike, env)) return jsonResponse({ ok: false, error: "forbidden" }, 403);
           const flags = await getAdminFlags(env);
           if (typeof body.capitalModeEnabled === "boolean") flags.capitalModeEnabled = body.capitalModeEnabled;
@@ -313,7 +265,7 @@ ${reply}`;
         }
 
 
-        if (url.pathname === "/api/admin/offer") {
+        if (pathEndsWith(url.pathname, "/api/admin/offer")) {
           if (typeof body.offerBanner === "string" && env.BOT_KV) {
             await setOfferBanner(env, body.offerBanner);
           }
@@ -329,7 +281,7 @@ ${reply}`;
           return jsonResponse({ ok: true, offerBanner: await getOfferBanner(env), offerBannerImage: await getOfferBannerImage(env) });
         }
 
-        if (url.pathname === "/api/admin/commissions") {
+        if (pathEndsWith(url.pathname, "/api/admin/commissions")) {
           const settings = await getCommissionSettings(env);
           const action = String(body.action || "");
           if (action === "setGlobal" && Number.isFinite(Number(body.percent))) {
@@ -348,7 +300,7 @@ ${reply}`;
           return jsonResponse({ ok: true, commission: await getCommissionSettings(env) });
         }
 
-        if (url.pathname === "/api/admin/users") {
+        if (pathEndsWith(url.pathname, "/api/admin/users")) {
           if (!isOwner(v.fromLike, env)) return jsonResponse({ ok: false, error: "forbidden" }, 403);
           const users = await listUsers(env, Number(body.limit || 100));
           const now = Date.now();
@@ -380,7 +332,7 @@ ${reply}`;
           return jsonResponse({ ok: true, users: report });
         }
 
-        if (url.pathname === "/api/admin/report/pdf") {
+        if (pathEndsWith(url.pathname, "/api/admin/report/pdf")) {
           if (!isOwner(v.fromLike, env)) return jsonResponse({ ok: false, error: "forbidden" }, 403);
           const users = await listUsers(env, Math.min(300, Math.max(1, Number(body.limit || 200))));
           const payments = await listPayments(env, 120);
@@ -398,10 +350,10 @@ ${reply}`;
           });
         }
 
-        if (url.pathname === "/api/admin/payments/list") {
+        if (pathEndsWith(url.pathname, "/api/admin/payments/list")) {
           return jsonResponse({ ok: true, payments: await listPayments(env, 100) });
         }
-        if (url.pathname === "/api/admin/capital/toggle") {
+        if (pathEndsWith(url.pathname, "/api/admin/capital/toggle")) {
           const username = String(body.username || "").trim();
           const enabled = !!body.enabled;
           const userId = await getUserIdByUsername(env, username);
@@ -414,12 +366,12 @@ ${reply}`;
         }
 
 
-        if (url.pathname === "/api/admin/withdrawals/list") {
+        if (pathEndsWith(url.pathname, "/api/admin/withdrawals/list")) {
           const withdrawals = await listWithdrawals(env, 200);
           return jsonResponse({ ok: true, withdrawals });
         }
 
-        if (url.pathname === "/api/admin/withdrawals/review") {
+        if (pathEndsWith(url.pathname, "/api/admin/withdrawals/review")) {
           const id = String(body.id || "").trim();
           const decision = String(body.decision || "").trim();
           const txHash = String(body.txHash || "").trim();
@@ -428,7 +380,7 @@ ${reply}`;
           return jsonResponse({ ok: true, withdrawal: updated });
         }
 
-        if (url.pathname === "/api/admin/payments/decision") {
+        if (pathEndsWith(url.pathname, "/api/admin/payments/decision")) {
           const paymentId = String(body.paymentId || "").trim();
           const status = String(body.status || "").trim() === "approved" ? "approved" : "rejected";
           const raw = env.BOT_KV ? await env.BOT_KV.get(`payment:${paymentId}`) : "";
@@ -444,7 +396,7 @@ ${reply}`;
         }
 
         // Backward-compat alias for older admin clients
-        if (url.pathname === "/api/admin/withdrawals/decision") {
+        if (pathEndsWith(url.pathname, "/api/admin/withdrawals/decision")) {
           const id = String(body.withdrawalId || body.id || "").trim();
           const decisionRaw = String(body.status || body.decision || "").trim();
           const decision = decisionRaw === "approved" ? "approved" : (decisionRaw === "rejected" ? "rejected" : "");
@@ -456,7 +408,7 @@ ${reply}`;
 
 
 
-        if (url.pathname === "/api/admin/payments/approve") {
+        if (pathEndsWith(url.pathname, "/api/admin/payments/approve")) {
           const username = String(body.username || "").trim();
           const userId = await getUserIdByUsername(env, username);
           if (!userId) return jsonResponse({ ok: false, error: "user_not_found" }, 404);
@@ -508,7 +460,7 @@ ${reply}`;
           return jsonResponse({ ok: true, payment, subscription: st.subscription });
         }
 
-        if (url.pathname === "/api/admin/subscription/activate") {
+        if (pathEndsWith(url.pathname, "/api/admin/subscription/activate")) {
           const username = String(body.username || "").trim();
           const userId = await getUserIdByUsername(env, username);
           if (!userId) return jsonResponse({ ok: false, error: "user_not_found" }, 404);
@@ -523,7 +475,7 @@ ${reply}`;
           return jsonResponse({ ok: true, subscription: st.subscription });
         }
 
-        if (url.pathname === "/api/admin/custom-prompts/requests") {
+        if (pathEndsWith(url.pathname, "/api/admin/custom-prompts/requests")) {
           if (String(body.action || "") === "decide") {
             const requestId = String(body.requestId || "").trim();
             const statusRaw = String(body.status || "").trim();
@@ -573,7 +525,7 @@ ${reply}`;
           return jsonResponse({ ok: true, requests: await listCustomPromptRequests(env, 200) });
         }
 
-        if (url.pathname === "/api/admin/custom-prompts/send") {
+        if (pathEndsWith(url.pathname, "/api/admin/custom-prompts/send")) {
           const username = String(body.username || "").trim();
           const promptId = String(body.promptId || "").trim();
           const userId = await getUserIdByUsername(env, username);
@@ -585,7 +537,7 @@ ${reply}`;
           return jsonResponse({ ok: true });
         }
 
-        if (url.pathname === "/api/admin/payments/check") {
+        if (pathEndsWith(url.pathname, "/api/admin/payments/check")) {
           const payload = {
             txHash: String(body.txHash || "").trim(),
             address: String(body.address || "").trim(),
@@ -596,7 +548,7 @@ ${reply}`;
         }
       }
 
-      if (url.pathname === "/api/support/ticket" && request.method === "POST") {
+      if (pathEndsWith(url.pathname, "/api/support/ticket") && request.method === "POST") {
         const body = await request.json().catch(() => null);
         if (!body) return jsonResponse({ ok: false, error: "bad_json" }, 400);
 
@@ -635,7 +587,7 @@ ${text}`);
         return jsonResponse({ ok: true, ticket, supportNotified: !!supportChatId });
       }
 
-      if (url.pathname === "/api/wallet/deposit/notify" && request.method === "POST") {
+      if (pathEndsWith(url.pathname, "/api/wallet/deposit/notify") && request.method === "POST") {
         const body = await request.json().catch(() => null);
         if (!body) return jsonResponse({ ok: false, error: "bad_json" }, 400);
         const v = await verifyTelegramInitData(body.initData, env.TELEGRAM_BOT_TOKEN, env.INITDATA_MAX_AGE_SEC, env.MINIAPP_AUTH_LENIENT);
@@ -671,10 +623,11 @@ TxID: ${txid}
         return jsonResponse({ ok: true, payment, supportNotified: !!supportChatId });
       }
 
-      if (url.pathname === "/api/chart" && request.method === "GET") {
+      if (pathEndsWith(url.pathname, "/api/chart") && request.method === "GET") {
         const symbol = String(url.searchParams.get("symbol") || "").trim().toUpperCase();
         const tf = String(url.searchParams.get("tf") || "H4").trim().toUpperCase();
         const levelsRaw = String(url.searchParams.get("levels") || "").trim();
+        const chartId = String(url.searchParams.get("id") || "").trim();
         const levels = levelsRaw
           ? levelsRaw.split(",").map((x) => Number(x)).filter((n) => Number.isFinite(n)).slice(0, 8)
           : [];
@@ -705,7 +658,14 @@ TxID: ${txid}
         }
 
         try {
-          const png = await renderQuickChartPng(env, candles, symbol, tf, levels);
+          let qcSpec = null;
+          if (chartId && env.BOT_KV) {
+            const raw = await env.BOT_KV.get(chartId);
+            if (raw) {
+              try { qcSpec = JSON.parse(raw); } catch { qcSpec = null; }
+            }
+          }
+          const png = await renderQuickChartPng(env, candles, symbol, tf, levels, qcSpec);
           return new Response(png, {
             status: 200,
             headers: {
@@ -730,7 +690,7 @@ TxID: ${txid}
         }
       }
 
-      if (url.pathname === "/api/quote" && request.method === "POST") {
+      if (pathEndsWith(url.pathname, "/api/quote") && request.method === "POST") {
         const body = await request.json().catch(() => null);
         if (!body) return jsonResponse({ ok: false, error: "bad_json" }, 400);
 
@@ -787,7 +747,7 @@ TxID: ${txid}
         return jsonResponse(quotePayload);
       }
 
-      if (url.pathname === "/api/news" && request.method === "POST") {
+      if (pathEndsWith(url.pathname, "/api/news") && request.method === "POST") {
         const body = await request.json().catch(() => null);
         if (!body) return jsonResponse({ ok: false, error: "bad_json" }, 400);
 
@@ -802,7 +762,7 @@ TxID: ${txid}
         const newsCachedResp = apiRespCacheGet(newsRespKey);
         if (newsCachedResp) return jsonResponse(newsCachedResp);
         try {
-          const articles = await fetchSymbolNewsFa(symbol, 5, env);
+          const articles = await fetchSymbolNewsFa(symbol, env);
           const payload = { ok: true, symbol, articles, count: articles.length };
           apiRespCacheSet(newsRespKey, payload, Number(env.NEWS_RESPONSE_CACHE_MS || 30000));
           return jsonResponse(payload);
@@ -812,7 +772,7 @@ TxID: ${txid}
         }
       }
 
-      if (url.pathname === "/api/news/analyze" && request.method === "POST") {
+      if (pathEndsWith(url.pathname, "/api/news/analyze") && request.method === "POST") {
         const body = await request.json().catch(() => null);
         if (!body) return jsonResponse({ ok: false, error: "bad_json" }, 400);
 
@@ -827,7 +787,7 @@ TxID: ${txid}
         const newsAnCachedResp = apiRespCacheGet(newsAnRespKey);
         if (newsAnCachedResp) return jsonResponse(newsAnCachedResp);
         try {
-          const articles = await fetchSymbolNewsFa(symbol, 5, env);
+          const articles = await fetchSymbolNewsFa(symbol, env);
           const summary = await buildNewsAnalysisSummary(symbol, articles, env);
           const payload = { ok: true, symbol, summary, articles, count: articles.length };
           apiRespCacheSet(newsAnRespKey, payload, Number(env.NEWS_ANALYSIS_RESPONSE_CACHE_MS || 45000));
@@ -837,31 +797,7 @@ TxID: ${txid}
           return jsonResponse({ ok: false, error: "news_analysis_unavailable", symbol, summary: "", articles: [] }, 502);
         }
       }
-
-      if (url.pathname === "/api/news/analyze-one" && request.method === "POST") {
-        const body = await request.json().catch(() => null);
-        if (!body) return jsonResponse({ ok: false, error: "bad_json" }, 400);
-
-        const v = await verifyMiniappAuth(body, env);
-        const allowGuest = miniappGuestEnabled(env) && !v.ok && !!body.allowGuest;
-        if (!v.ok && !allowGuest) return jsonResponse({ ok: false, error: v.reason }, 401);
-
-        const symbol = String(body.symbol || "").trim().toUpperCase();
-        if (!symbol || !isSymbol(symbol)) return jsonResponse({ ok: false, error: "invalid_symbol" }, 400);
-
-        const article = body.article || null;
-        if (!article || (!article.url && !article.title)) return jsonResponse({ ok: false, error: "invalid_article" }, 400);
-
-        try {
-          const res = await getOrBuildNewsArticleAnalysis(symbol, article, env);
-          return jsonResponse({ ok: true, symbol, id: res.id, analysis: res.analysis, generatedAt: res.generatedAt });
-        } catch (e) {
-          console.error("api/news/analyze-one failed:", e?.message || e);
-          return jsonResponse({ ok: false, error: "news_one_unavailable", symbol }, 502);
-        }
-      }
-
-      if (url.pathname === "/api/analyze" && request.method === "POST") {
+      if (pathEndsWith(url.pathname, "/api/analyze") && request.method === "POST") {
         const body = await request.json().catch(() => null);
         if (!body) return jsonResponse({ ok: false, error: "bad_json" }, 400);
 
@@ -871,6 +807,36 @@ TxID: ${txid}
         const st = await ensureUser(v.userId, env, v.fromLike);
         const symbol = String(body.symbol || "").trim();
         if (!symbol || !isSymbol(symbol)) return jsonResponse({ ok: false, error: "invalid_symbol" }, 400);
+
+        // Apply per-request preferences (so "Analyze" works حتی بدون زدن Save)
+        if (typeof body.timeframe === "string") st.timeframe = String(body.timeframe || "").trim() || st.timeframe;
+
+        if (typeof body.style === "string") {
+          const styles = await getStyleList(env);
+          const s = String(body.style || "").trim();
+          if (styles.includes(s)) st.style = s;
+        }
+
+        if (typeof body.risk === "string") st.risk = String(body.risk || "").trim() || st.risk;
+        if (typeof body.newsEnabled === "boolean") st.newsEnabled = body.newsEnabled;
+
+        if (typeof body.promptMode === "string") {
+          const pm = String(body.promptMode || "").trim();
+          const allowedPromptModes = ["style_only", "combined_all", "custom_only", "style_plus_custom"];
+          st.promptMode = allowedPromptModes.includes(pm) ? pm : (st.promptMode || "style_plus_custom");
+        }
+
+        if (typeof body.customPromptId === "string") {
+          const prompts = await getCustomPrompts(env);
+          const id = String(body.customPromptId || "").trim();
+          st.customPromptId = prompts.find((p) => String(p?.id || "") === id) ? id : "";
+        }
+
+        if (typeof body.selectedSymbol === "string") {
+          const ss = String(body.selectedSymbol || "").trim().toUpperCase();
+          if (!ss || isSymbol(ss)) st.selectedSymbol = ss;
+        }
+
 
         const isOnboardingReady = !!(
           st.profile?.onboardingDone &&
@@ -884,22 +850,31 @@ TxID: ${txid}
           return jsonResponse({ ok: false, error: "onboarding_required" }, 403);
         }
 
-        if (env.BOT_KV && !canAnalyzeToday(st, v.fromLike, env)) {
-          const quota = isStaff(v.fromLike, env) ? "∞" : `${st.dailyUsed}/${dailyLimit(env, st)}`;
-          return jsonResponse({ ok: false, error: `quota_exceeded_${quota}` }, 429);
-        }
 
         const userPrompt = typeof body.userPrompt === "string" ? body.userPrompt : "";
 
+        // NEW: points-based billing for free-pro users
+        const ptsCheck = canSpendAnalysisPoints(st, v.fromLike, env);
+        if (!ptsCheck.ok) {
+          return jsonResponse({ ok: false, error: ptsCheck.reason }, 402);
+        }
+
+
         try {
           const flowTimeoutMs = Math.max(15000, Number(env.SIGNAL_FLOW_TIMEOUT_MS || 70000));
-          const result = await Promise.race([
-            runSignalTextFlowReturnText(env, v.fromLike, st, symbol, userPrompt),
+          
+          const bundle = await Promise.race([
+            runSignalTextFlowReturnBundle(env, v.fromLike, st, symbol, userPrompt),
             timeoutPromise(flowTimeoutMs, "api_analyze_timeout"),
           ]);
+          const result = bundle?.text || "";
+          const qcRaw = bundle?.qcRaw || null;
+
           if (env.BOT_KV) {
             consumeDaily(st, v.fromLike, env);
             recordAnalysisSuccess(st);
+            // NEW: deduct points on each successful analysis (all users)
+            if (!isStaff(v.fromLike, env)) spendAnalysisPoints(st, env);
             await saveUser(v.userId, st, env);
           }
           const quota = isStaff(v.fromLike, env) ? "∞" : `${st.dailyUsed}/${dailyLimit(env, st)}`;
@@ -912,12 +887,21 @@ TxID: ${txid}
             if (String(env.QUICKCHART || "") !== "0") {
               const tf = st.timeframe || "H4";
               levels = extractLevels(result);
+              const qcSpec = normalizeQcSpec(qcRaw, levels);
               const origin = new URL(request.url).origin;
               const candles = await getMarketCandlesWithFallback(env, symbol, tf).catch(() => []);
               chartCandlesCount = Array.isArray(candles) ? candles.length : 0;
               if (Array.isArray(candles) && candles.length) {
-                chartUrl = `${origin}/api/chart?symbol=${encodeURIComponent(symbol)}&tf=${encodeURIComponent(tf)}&levels=${encodeURIComponent(levels.join(","))}`;
-                quickChartSpec = buildQuickChartSpec(candles, symbol, tf, levels);
+                let chartId = "";
+                if (env.BOT_KV) {
+                  chartId = `qc|${v.userId}|${Date.now()}`;
+                  const ttl = Number(env.CHART_SPEC_TTL_SEC || 900);
+                  await env.BOT_KV.put(chartId, JSON.stringify(qcSpec), { expirationTtl: Math.max(60, ttl) });
+                }
+                chartUrl = chartId
+                  ? `${origin}/api/chart?symbol=${encodeURIComponent(symbol)}&tf=${encodeURIComponent(tf)}&id=${encodeURIComponent(chartId)}`
+                  : `${origin}/api/chart?symbol=${encodeURIComponent(symbol)}&tf=${encodeURIComponent(tf)}&levels=${encodeURIComponent(levels.join(","))}`;
+                quickChartSpec = buildQuickChartSpec(candles, symbol, tf, levels, qcSpec);
               } else if (levels.length) {
                 chartUrl = buildQuickChartLevelsOnlyUrl(symbol, tf, levels);
                 quickChartSpec = { fallback: "levels_only", symbol, timeframe: tf, levels };
@@ -948,9 +932,11 @@ TxID: ${txid}
         }
       }
 
-      // Telegram webhook route: /telegram/<secret>
-      if (url.pathname.startsWith("/telegram/")) {
-        const secret = url.pathname.split("/")[2] || "";
+      // Telegram webhook route: /telegram/<secret> (supports rootpath prefixes like /bot/telegram/<secret>)
+      if (pathIncludes(url.pathname, "/telegram/")) {
+        const parts = url.pathname.split("/").filter(Boolean);
+        const tIdx = parts.indexOf("telegram");
+        const secret = tIdx >= 0 ? (parts[tIdx + 1] || "") : "";
         if (!env.TELEGRAM_WEBHOOK_SECRET || secret !== String(env.TELEGRAM_WEBHOOK_SECRET)) {
           return new Response("forbidden", { status: 403 });
         }
@@ -959,7 +945,6 @@ TxID: ${txid}
         const update = await request.json().catch(() => null);
         if (!update) return new Response("bad request", { status: 400 });
 
-        // respond fast; do heavy work in waitUntil
         ctx.waitUntil(handleUpdate(update, env));
         return new Response("ok", { status: 200 });
       }
@@ -980,6 +965,14 @@ TxID: ${txid}
 };
 
 /* ========================== BRAND / COPY ========================== */
+const MINIAPP_EXEC_CHECKLIST_TEXT = [
+  "✅ دامنه را در BotFather > Bot Settings > Domain ثبت کن",
+  "✅ Menu Button را روی MINIAPP_URL تنظیم کن",
+  "✅ Worker با RootPath درست Deploy شده باشد (مثلاً /bot)",
+  "✅ WEB_ADMIN_TOKEN/WEB_OWNER_TOKEN فقط برای وب (خارج تلگرام) است",
+  "✅ داخل تلگرام Mini App باید initData داشته باشد",
+].join("\n");
+
 const BOT_NAME = "MarketiQ";
 const WELCOME_BOT =
 `🎯 متن خوش‌آمدگویی بات تلگرام MarketiQ
@@ -1010,11 +1003,8 @@ const WELCOME_BOT =
 ────────────────────────
 
 🚀 شروع کنید
-/start | شروع تحلیل
-/signals | سیگنال‌ها
-/education | آموزش و مفاهیم بازار
-/support | پشتیبانی
-
+/signals
+/support
 ────────────────────────
 
 ⚠️ سلب مسئولیت:
@@ -1141,7 +1131,7 @@ function applyLocaleDefaults(st) {
     st.style = st.profile.preferredStyle;
   }
   if (typeof st.newsEnabled !== "boolean") st.newsEnabled = true;
-  if (!st.promptMode) st.promptMode = "style_plus_custom";
+  if (!st.promptMode) st.promptMode = "style_only";
   return st;
 }
 
@@ -1188,7 +1178,10 @@ async function finalizeOnboardingRewards(env, st) {
   const inviterId = String(st.referral.referredBy);
   const inviter = await ensureUser(inviterId, env);
   inviter.referral.successfulInvites = (inviter.referral.successfulInvites || 0) + 1;
+  // legacy referral points (kept)
   inviter.referral.points = (inviter.referral.points || 0) + 3;
+  // NEW: free-pro invite points
+  awardInvitePoints(inviter, env);
   if (inviter.referral.points >= 500) {
     inviter.referral.points -= 500;
     inviter.subscription.active = true;
@@ -1207,6 +1200,40 @@ function isStaff(from, env) {
   return isOwner(from, env) || isAdmin(from, env);
 }
 
+
+function isFreePro(st) {
+  return !!(st?.subscription?.active && (st.subscription.type === "gift" || st.subscription.type === "free_pro"));
+}
+function ensurePoints(st) {
+  if (!st.points) st.points = { balance: 0, spent: 0, earnedFromInvites: 0, initialized: false };
+  st.points.balance = Number.isFinite(Number(st.points.balance)) ? Number(st.points.balance) : 0;
+  st.points.spent = Number.isFinite(Number(st.points.spent)) ? Number(st.points.spent) : 0;
+  st.points.earnedFromInvites = Number.isFinite(Number(st.points.earnedFromInvites)) ? Number(st.points.earnedFromInvites) : 0;
+  if (typeof st.points.initialized !== "boolean") st.points.initialized = false;
+  return st;
+}
+function canSpendAnalysisPoints(st, fromLike, env) {
+  // Points are enforced for ALL users (except staff)
+  if (isStaff(fromLike, env)) return { ok: true };
+  ensurePoints(st);
+  const cost = Number(env.ANALYSIS_POINTS_COST || 2);
+  if (st.points.balance < cost) return { ok: false, reason: "insufficient_points" };
+  return { ok: true };
+}
+function spendAnalysisPoints(st, env) {
+  ensurePoints(st);
+  const cost = Number(env.ANALYSIS_POINTS_COST || 2);
+  st.points.balance = Math.max(0, Number(st.points.balance) - cost);
+  st.points.spent = Number(st.points.spent) + cost;
+}
+function awardInvitePoints(inviter, env) {
+  // each successful invite gives 1000 points if inviter is free-pro
+  if (!isFreePro(inviter)) return;
+  ensurePoints(inviter);
+  const gain = Number(env.INVITE_POINTS_GAIN || 1000);
+  inviter.points.balance = Number(inviter.points.balance) + gain;
+  inviter.points.earnedFromInvites = Number(inviter.points.earnedFromInvites) + gain;
+}
 function isOwner(from, env) {
   const u = normHandle(from?.username);
   if (!u) return false;
@@ -1224,6 +1251,13 @@ function isAdmin(from, env) {
   const set = new Set(raw.split(",").map(normHandle).filter(Boolean));
   return set.has(u);
 }
+
+function firstHandleFromCsv(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return "";
+  return s.split(",").map((x) => normHandle(x)).filter(Boolean)[0] || "";
+}
+
 
 function kyivDateString(d = new Date()) {
   return new Intl.DateTimeFormat("en-CA", {
@@ -1315,6 +1349,18 @@ function cacheSet(map, key, value, ttlMs, maxSize = 500) {
     const [first] = map.keys();
     if (first) map.delete(first);
   }
+
+function hash32FNV1a(str) {
+  const s = String(str || "");
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  // unsigned
+  return (h >>> 0).toString(16);
+}
+
 }
 
 async function r2GetJson(bucket, key) {
@@ -1355,23 +1401,347 @@ const DEFAULT_ANALYSIS_PROMPT = `SYSTEM: تحلیل‌گر حرفه‌ای با�
 3) فقط از داده MARKET_DATA استفاده کن و خیال‌پردازی نکن.
 4) ورودی‌های کاربر را الزامی لحاظ کن: Symbol, Timeframe, Risk, Capital.
 5) خروجی را مرحله‌ای، اجرایی و با مدیریت ریسک ارائه بده.
-6) در صورت نبود داده کافی، شفاف اعلام کن.
+6) در صورت نبود داده کافی، شفاف اعلام کن.`;
 
-ساختار خروجی:
-۱) بایاس و وضعیت ساختار
-۲) نواحی و نقدینگی/سطوح کلیدی
-۳) سناریوی ورود (Entry/SL/TP)
-۴) مدیریت ریسک و اندازه پوزیشن
-۵) سناریوی ابطال و جمع‌بندی اجرایی`;
-
-/* ========================== STYLE PROMPTS (DEFAULTS) ==========================
+/* ========================== STYLE PROMPTS (DEFAULTS)A ==========================
  * Users choose st.style (Persian labels) and we inject a style-specific guide
  * into the analysis prompt. Admin can still override the global base prompt via KV.
  */
 const STYLE_PROMPTS_DEFAULT = {
-  "ICT": `{"role":"system","identity":{"title":"ICT & Smart Money Analyst","methodology":["ICT (Inner Circle Trader)","Smart Money Concepts"],"restrictions":["No indicators","No retail concepts","ICT & Smart Money concepts ONLY"]},"task":{"description":"Analyze the requested market (Symbol, Timeframe) using ICT & Smart Money Concepts ONLY."},"analysis_requirements":{"1_higher_timeframe_bias":{"timeframes":["Daily","H4"],"elements":["Overall HTF bias (Bullish / Bearish / Neutral)","Premium zone","Discount zone","Equilibrium level (50%)","Imbalance vs Balance state"]},"2_liquidity_mapping":{"identify":["Equal Highs (EQH)","Equal Lows (EQL)","Buy-side liquidity","Sell-side liquidity","Stop-loss pools"],"objective":"Determine where liquidity is resting and likely to be engineered toward"},"3_market_structure":{"elements":["BOS (Break of Structure)","MSS / CHoCH (Market Structure Shift)"],"clarification":["Manipulation phase","Expansion phase"]},"4_pd_arrays":{"arrays":["Bullish Order Blocks","Bearish Order Blocks","Fair Value Gaps (FVG)","Liquidity Voids","Previous Day High (PDH)","Previous Day Low (PDL)","Previous Week High (PWH)","Previous Week Low (PWL)"]},"5_kill_zones":{"condition":"Intraday only","zones":["London Kill Zone","New York Kill Zone"],"explanation":"Explain why timing matters for this setup"},"6_entry_model":{"model_examples":["Liquidity Sweep → MSS → FVG Entry","Liquidity Sweep → Order Block Entry"],"must_include":["Entry price","Stop Loss location (above/below OB or swing)","Take Profit targets based on liquidity"]},"7_narrative":{"storytelling":["Who is trapped?","Where did smart money enter?","Where is price likely engineered to go?"]}},"execution_plan":{"bias":"Bullish or Bearish","entry_conditions":"Clear confirmation rules","targets":"Liquidity-based targets","invalidation_point":"Price level that invalidates the idea"},"output_style":{"tone":"Professional, precise, educational","structure":"Step-by-step, clearly labeled sections","language":"Clear and technical ICT terminology"}}`,
-  "ATR": `{"role":"quantitative_trading_assistant","strategy":"ATR-based volatility trading","analysis_requirements":{"volatility_state":["Current ATR value","Comparison with historical ATR average","Volatility expansion or contraction"],"market_condition":["Trending or Ranging","Breakout vs Mean Reversion suitability"],"trade_setup":{"entry":"Based on price structure","stop_loss":"SL = Entry ± (ATR × Multiplier)","take_profit":["TP1 based on ATR expansion","TP2 based on ATR expansion"]},"position_sizing":["Risk per trade (%)","Position size based on SL distance"],"trade_filtering":["When NOT to trade based on ATR","High-risk volatility conditions (news, spikes)"],"risk_management":["Max daily loss","Max consecutive losses","ATR-based trailing stop logic"],"summary":["Statistical justification","Expected trade duration","Risk classification (Low/Medium/High)"]}}`,
-  "پرایس اکشن": `{"role":"system","description":"Professional Price Action Market Analysis Prompt","constraints":{"analysis_style":"Pure Price Action Only","indicators":"Forbidden unless explicitly requested","focus":"High-probability setups only","language":"Professional, clear, step-by-step"},"required_sections":{"market_structure":{"items":["Trend identification (Uptrend / Downtrend / Range)","HH, HL, LH, LL labeling","Structure status (Intact / BOS / MSS)"]},"key_levels":{"items":["Strong Support zones","Strong Resistance zones","Flip zones (SR to Resistance / Resistance to Support)","Psychological levels (if relevant)"]},"candlestick_behavior":{"items":["Pin Bar","Engulfing","Inside Bar","Explanation of buyer/seller intent"]},"entry_scenarios":{"requirements":["Clear entry zone","Logical structure-based Stop Loss","TP1 and TP2 targets","Minimum Risk:Reward of 1:2"]},"bias_and_scenarios":{"items":["Main bias (Bullish / Bearish / Neutral)","Alternative scenario upon invalidation"]},"execution_plan":{"items":["Continuation or Reversal trade","Required confirmation before entry"]}},"instructions":["Explain everything step-by-step","Use structure-based logic","Avoid overtrading","Execution-focused explanations"]}`,
+  "پرایس اکشن": `{
+  "role": "سیستم",
+  "description": "پرامپت حرفه‌ای تحلیل بازار بر پایه پرایس‌اکشن",
+  "constraints": {
+    "analysis_style": "فقط پرایس‌اکشن خالص",
+    "indicators": "ممنوع مگر اینکه صراحتاً درخواست شود",
+    "focus": "فقط ستاپ‌های با احتمال موفقیت بالا",
+    "language": "حرفه‌ای، شفاف، مرحله‌به‌مرحله"
+  },
+  "required_sections": {
+    "market_structure": {
+      "items": [
+        "تشخیص روند (روند صعودی / روند نزولی / رِنج)",
+        "برچسب‌گذاری HH, HL, LH, LL",
+        "وضعیت ساختار (سالم / BOS / MSS)"
+      ]
+    },
+    "key_levels": {
+      "items": [
+        "ناحیه‌های حمایتِ قوی",
+        "ناحیه‌های مقاومتِ قوی",
+        "ناحیه‌های فلیپ (حمایت→مقاومت / مقاومت→حمایت)",
+        "سطوح روانی (در صورت مرتبط بودن)"
+      ]
+    },
+    "candlestick_behavior": {
+      "items": [
+        "پین‌بار (Pin Bar)",
+        "اِنگالفینگ (Engulfing)",
+        "اینسایدبار (Inside Bar)",
+        "توضیح نیت خریدار/فروشنده"
+      ]
+    },
+    "entry_scenarios": {
+      "requirements": [
+        "زون ورودِ واضح",
+        "حد ضرر منطقی بر اساس ساختار",
+        "اهداف TP1 و TP2",
+        "حداقل نسبت ریسک به ریوارد ۱:۲"
+      ]
+    },
+    "bias_and_scenarios": {
+      "items": [
+        "بایاس اصلی (صعودی / نزولی / خنثی)",
+        "سناریوی جایگزین در صورت بی‌اعتبار شدن"
+      ]
+    },
+    "execution_plan": {
+      "items": [
+        "معامله ادامه‌دهنده (Continuation) یا برگشتی (Reversal)",
+        "تأییدیه‌های لازم قبل از ورود"
+      ]
+    }
+  },
+  "instructions": [
+    "همه چیز را مرحله‌به‌مرحله توضیح بده",
+    "از منطق مبتنی بر ساختار استفاده کن",
+    "از اورترید (معاملات بیش از حد) پرهیز کن",
+    "توضیحات اجرای‌محور ارائه بده"
+  ]
+}
+خروجی باید دقیقاً با همین سرفصل‌ها و به همین ترتیب باشد و هیچ مقدمه/متن اضافه‌ای نیاور:
+
+### 1) ساختار بازار (Market Structure)
+- روند: (صعودی/نزولی/رِنج)
+- برچسب‌گذاری: HH/HL/LH/LL
+- وضعیت ساختار: (سالم / BOS / MSS)
+
+### 2) سطوح کلیدی (Key Levels)
+- حمایت‌های قوی:
+- مقاومت‌های قوی:
+- فلیپ‌زون‌ها:
+- سطوح روانی (اگر مرتبط):
+
+### 3) رفتار کندلی (Candlestick Behavior)
+- (Pin Bar / Engulfing / Inside Bar) + توضیح نیت خریدار/فروشنده
+
+### 4) سناریوهای ورود (Entry Scenarios)
+- سناریوی ۱:
+  - ناحیه ورود:
+  - حد ضرر:
+  - اهداف: TP1 / TP2
+  - R:R حداقل 1:2
+- سناریوی ۲ (اختیاری):
+
+### 5) بایاس و سناریوها (Bias & Scenarios)
+- بایاس اصلی:
+- سناریوی جایگزین + شرط بی‌اعتبارسازی:
+
+### 6) برنامه اجرای معامله (Execution Plan)
+- نوع ستاپ: (Continuation/Reversal)
+- چک‌لیست تایید قبل از ورود:
+
+قوانین سخت:
+- فقط فارسی
+- فقط پرایس‌اکشن خالص (اندیکاتور ممنوع مگر کاربر صریحاً درخواست کند)
+- خیال‌بافی ممنوع؛ فقط بر اساس OHLC داده‌شده
+
+در انتهای خروجی، فقط و فقط این بلاک را اضافه کن:
+<QCJSON>{"zones":[],"supports":[],"resistances":[],"tp":[],"sl":0}</QCJSON>`,
+  "ICT/Smart Money": `{
+  "role": "سیستم",
+  "identity": {
+    "title": "تحلیل‌گر ICT و اسمارت‌مانی",
+    "methodology": [
+      "ICT (Inner Circle Trader)",
+      "مفاهیم اسمارت‌مانی (Smart Money Concepts)"
+    ],
+    "restrictions": [
+      "بدون اندیکاتور",
+      "بدون مفاهیم ریتیل",
+      "فقط مفاهیم ICT و اسمارت‌مانی"
+    ]
+  },
+  "task": {
+    "description": "بازار درخواستی (نماد، تایم‌فریم) را فقط با مفاهیم ICT و اسمارت‌مانی تحلیل کن."
+  },
+  "analysis_requirements": {
+    "1_higher_timeframe_bias": {
+      "timeframes": [
+        "روزانه (Daily)",
+        "چهارساعته (H4)"
+      ],
+      "elements": [
+        "بایاس کلی HTF (صعودی / نزولی / خنثی)",
+        "زون پریمیوم (Premium)",
+        "زون دیسکانت (Discount)",
+        "سطح تعادل (Equilibrium) در ۵۰٪",
+        "وضعیت عدم‌تعادل در برابر تعادل (Imbalance vs Balance)"
+      ]
+    },
+    "2_liquidity_mapping": {
+      "identify": [
+        "سقف‌های برابر (EQH)",
+        "کف‌های برابر (EQL)",
+        "لیکوئیدیتی سمت خریداران (Buy-side)",
+        "لیکوئیدیتی سمت فروشندگان (Sell-side)",
+        "استخرهای حد ضرر (Stop-loss pools)"
+      ],
+      "objective": "مشخص کن نقدینگی کجا قرار دارد و احتمالاً قیمت برای جمع‌آوری آن به کدام سمت مهندسی می‌شود."
+    },
+    "3_market_structure": {
+      "elements": [
+        "BOS (شکست ساختار)",
+        "MSS / CHoCH (تغییر/شیفت ساختار بازار)"
+      ],
+      "clarification": [
+        "فاز دستکاری (Manipulation)",
+        "فاز گسترش/اکسپنشن (Expansion)"
+      ]
+    },
+    "4_pd_arrays": {
+      "arrays": [
+        "اوردر بلاک‌های صعودی (Bullish Order Blocks)",
+        "اوردر بلاک‌های نزولی (Bearish Order Blocks)",
+        "گپ ارزش منصفانه (FVG)",
+        "خلأهای لیکوئیدیتی (Liquidity Voids)",
+        "سقف روز قبل (PDH)",
+        "کف روز قبل (PDL)",
+        "سقف هفته قبل (PWH)",
+        "کف هفته قبل (PWL)"
+      ]
+    },
+    "5_kill_zones": {
+      "condition": "فقط اینترادی (Intraday)",
+      "zones": [
+        "کیل‌زون لندن (London Kill Zone)",
+        "کیل‌زون نیویورک (New York Kill Zone)"
+      ],
+      "explanation": "توضیح بده چرا زمان‌بندی برای این ستاپ مهم است."
+    },
+    "6_entry_model": {
+      "model_examples": [
+        "شکار نقدینگی → MSS → ورود روی FVG",
+        "شکار نقدینگی → ورود روی اوردر بلاک"
+      ],
+      "must_include": [
+        "قیمت ورود",
+        "محل حد ضرر (بالا/پایین OB یا سوئینگ)",
+        "اهداف برداشت سود بر اساس نقدینگی"
+      ]
+    },
+    "7_narrative": {
+      "storytelling": [
+        "چه کسی گیر افتاده؟",
+        "اسمارت‌مانی کجا وارد شده؟",
+        "قیمت احتمالاً برای رسیدن به کجا مهندسی می‌شود؟"
+      ]
+    }
+  },
+  "execution_plan": {
+    "bias": "صعودی یا نزولی",
+    "entry_conditions": "قوانین تأیید ورودِ شفاف",
+    "targets": "اهداف مبتنی بر لیکوئیدیتی",
+    "invalidation_point": "سطحی که ایده را بی‌اعتبار می‌کند"
+  },
+  "output_style": {
+    "tone": "حرفه‌ای، دقیق، آموزشی",
+    "structure": "مرحله‌به‌مرحله با بخش‌بندی واضح",
+    "language": "شفاف و تکنیکال با ترمینولوژی ICT"
+  }
+}
+خروجی باید دقیقاً با همین سرفصل‌ها و شماره‌گذاری باشد و هیچ مقدمه/متن اضافه‌ای نیاور:
+
+### 1. تمایل زمان بالا (Higher Timeframe Bias)
+- تمایل HTF (D1/H4):
+- مناطق پریمیوم و دیسکانت:
+- تعادل/عدم تعادل:
+
+### 2. نقشه‌برداری از نقدینگی (Liquidity Mapping)
+- EQH/EQL:
+- نقدینگی خرید/فروش:
+- مخازن توقف:
+
+### 3. ساختار بازار (Market Structure)
+- BOS:
+- MSS:
+- دستکاری/گسترش:
+
+### 4. آرایه‌های PD (PD Arrays)
+- Order Blocks:
+- FVG:
+- خلاءهای نقدینگی:
+- PDH/PDL/PWH/PWL (اگر قابل استخراج):
+
+### 5. Kill Zones (اگر اینترادی است)
+- لندن:
+- نیویورک:
+- نکته زمانی:
+
+### 6. مدل ورود (Entry Model)
+- مدل: (Sweep → MSS → FVG)
+- Entry:
+- Stop Loss:
+- Take Profits:
+
+### 7. روایت (Narrative)
+- چه کسی در تله است؟
+- پول هوشمند کجا وارد شد؟
+- قیمت به کجا مهندسی شده؟
+
+### برنامه اجرایی
+- سناریوی اصلی:
+- نقطه ابطال (Invalidation):
+
+قوانین سخت:
+- فقط فارسی
+- فقط ICT/Smart Money
+- خیال‌بافی ممنوع؛ فقط بر اساس OHLC داده‌شده
+
+در انتهای خروجی، فقط و فقط این بلاک را اضافه کن:
+<QCJSON>{"zones":[],"supports":[],"resistances":[],"tp":[],"sl":0}</QCJSON>`,
+  "ATR": `{
+  "role": "دستیار معامله‌گری کمی",
+  "strategy": "معامله‌گری نوسانی مبتنی بر ATR",
+  "analysis_requirements": {
+    "volatility_state": [
+      "مقدار فعلی ATR",
+      "مقایسه با میانگین تاریخی ATR",
+      "انبساط یا انقباض نوسان"
+    ],
+    "market_condition": [
+      "رونددار یا رِنج",
+      "مناسب برای بریک‌اوت در برابر میانگین‌گیری/بازگشت به میانگین (Mean Reversion)"
+    ],
+    "trade_setup": {
+      "entry": "بر اساس ساختار قیمت",
+      "stop_loss": "حد ضرر = ورود ± (ATR × ضریب)",
+      "take_profit": [
+        "TP1 بر اساس انبساط ATR",
+        "TP2 بر اساس انبساط ATR"
+      ]
+    },
+    "position_sizing": [
+      "ریسک هر معامله (%)",
+      "سایز پوزیشن بر اساس فاصله حد ضرر"
+    ],
+    "trade_filtering": [
+      "چه زمانی بر اساس ATR نباید معامله کرد",
+      "شرایط نوسانی پرریسک (خبر، اسپایک‌ها)"
+    ],
+    "risk_management": [
+      "حداکثر ضرر روزانه",
+      "حداکثر تعداد باخت‌های متوالی",
+      "منطق تریلینگ‌استاپ مبتنی بر ATR"
+    ],
+    "summary": [
+      "توجیه آماری",
+      "مدت‌زمان مورد انتظار معامله",
+      "طبقه‌بندی ریسک (کم/متوسط/زیاد)"
+    ]
+  }
+}
+خروجی باید دقیقاً با این سرفصل‌ها باشد و هیچ مقدمه/متن اضافه‌ای نیاور:
+
+### 1) وضعیت نوسان (ATR)
+- ATR فعلی (تقریبی/استنباطی از داده):
+- مقایسه با میانگین تاریخی:
+- انبساط/انقباض:
+
+### 2) وضعیت بازار
+- رونددار یا رِنج:
+- مناسب برای بریک‌اوت یا Mean Reversion:
+
+### 3) ستاپ معامله
+- Entry:
+- Stop Loss = ورود ± (ATR × ضریب):
+- TP1 / TP2 بر اساس انبساط ATR:
+
+### 4) سایز پوزیشن
+- ریسک هر معامله (%):
+- سایز پوزیشن بر اساس فاصله حد ضرر:
+
+### 5) فیلترهای عدم معامله
+- چه زمانی معامله نکنیم:
+- شرایط نوسانی پرریسک:
+
+### 6) مدیریت ریسک
+- حداکثر ضرر روزانه:
+- حداکثر باخت‌های متوالی:
+- تریلینگ‌استاپ مبتنی بر ATR:
+
+### 7) خلاصه
+- توجیه آماری:
+- مدت‌زمان مورد انتظار:
+- طبقه‌بندی ریسک:
+
+قوانین سخت:
+- فقط فارسی
+- فقط ATR-Style
+- خیال‌بافی ممنوع؛ فقط بر اساس OHLC داده‌شده
+
+در انتهای خروجی، فقط و فقط این بلاک را اضافه کن:
+<QCJSON>{"zones":[],"supports":[],"resistances":[],"tp":[],"sl":0}</QCJSON>`,
 };
 const DEFAULT_CUSTOM_PROMPTS = [
   { id: "ict_style", title: "ICT & Smart Money", text: STYLE_PROMPTS_DEFAULT["ICT"] },
@@ -1490,6 +1860,19 @@ async function getFreeDailyLimit(env) {
 async function setFreeDailyLimit(env, limit) {
   if (!env.BOT_KV) return;
   await env.BOT_KV.put("settings:free_daily_limit", String(limit));
+}
+
+
+async function getBasePoints(env) {
+  // Admin-configured base points (applied to new users and one-time backfill for zeroed users)
+  const fallback = 50;
+  if (!env.BOT_KV) return fallback;
+  const raw = await env.BOT_KV.get("settings:base_points");
+  return toInt(raw, fallback);
+}
+async function setBasePoints(env, points) {
+  if (!env.BOT_KV) return;
+  await env.BOT_KV.put("settings:base_points", String(points));
 }
 const ALLOWED_STYLE_LIST = ["پرایس اکشن", "ICT", "ATR"];
 const DEFAULT_STYLE_LIST = ALLOWED_STYLE_LIST.slice();
@@ -1822,38 +2205,16 @@ async function runDailyProfileNotifications(env) {
 
 
 async function verifyBlockchainPayment(payload, env) {
-  const primary = String(env.BLOCKCHAIN_CHECK_URL || "").trim();
-  const fallback = primary ? [primary] : [];
-  const items = loadUrlItems(env, "blockchain", fallback);
-  if (!items.length) return { ok: false, reason: "check_url_missing" };
-  const timeoutMs = Number(env.BLOCKCHAIN_CHECK_TIMEOUT_MS || 8000);
-
-  try {
-    const j = await withRotation("blockchain", env, items, async (it, ctx) => {
-      const r = await fetchWithTimeout(String(it.url), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        signal: ctx.signal,
-      }, Math.min(timeoutMs, ctx.timeoutMs));
-      if (!r.ok) {
-        const bodyText = await r.text().catch(() => "");
-        throw new HttpError(`blockchain_http_${r.status}`, r.status, r.headers, bodyText);
-      }
-      const out = await r.json().catch(() => null);
-      if (!out) throw new Error("blockchain_bad_json");
-      if (out?.ok === false && /rate|limit/i.test(String(out?.reason || ""))) {
-        throw new HttpError("blockchain_rate", 429, r.headers, String(out?.reason || ""));
-      }
-      return out;
-    }, { attempts: Math.min(3, Math.max(1, items.length)), timeoutMs });
-
-    return j;
-  } catch (e) {
-    return { ok: false, reason: "all_endpoints_failed", error: String(e?.message || e) };
-  }
+  const endpoint = (env.BLOCKCHAIN_CHECK_URL || "").toString().trim();
+  if (!endpoint) return { ok: false, reason: "check_url_missing" };
+  const r = await fetchWithTimeout(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }, Number(env.BLOCKCHAIN_CHECK_TIMEOUT_MS || 8000));
+  const j = await r.json().catch(() => null);
+  return j || { ok: false, reason: "bad_response" };
 }
-
 
 /* ========================== KEYBOARDS ========================== */
 function kb(rows) {
@@ -1868,25 +2229,14 @@ function kb(rows) {
 function mainMenuKeyboard(env) {
   return kb([
     [BTN.SIGNAL, BTN.SETTINGS],
-    [BTN.QUOTE, BTN.NEWS],
-    [BTN.NEWS_ANALYSIS, BTN.MINIAPP],
     [BTN.WALLET, BTN.PROFILE],
     [BTN.INVITE, BTN.SUPPORT],
-    [BTN.EDUCATION, BTN.LEVELING],
     [BTN.HOME],
   ]);
 }
 
 function signalMenuKeyboard() {
   return kb([[BTN.CAT_MAJORS, BTN.CAT_METALS], [BTN.CAT_INDICES, BTN.CAT_CRYPTO], [BTN.QUOTE, BTN.NEWS], [BTN.BACK, BTN.HOME]]);
-}
-
-function symbolPickerKeyboard(columns = 3) {
-  const symbols = [...MAJORS, ...METALS, ...INDICES, ...CRYPTOS];
-  const rows = [];
-  for (let i = 0; i < symbols.length; i += columns) rows.push(symbols.slice(i, i + columns));
-  rows.push([BTN.BACK, BTN.HOME]);
-  return kb(rows);
 }
 
 function settingsMenuKeyboard() {
@@ -1932,11 +2282,9 @@ function getMiniappUrl(env) {
   const raw = configured || DEFAULT_MINIAPP_URL;
   try {
     const u = new URL(raw);
-    // Keep configured pathname (supports prefix routes like https://domain.com/miniapp/)
+    u.pathname = "/";
     u.search = "";
     u.hash = "";
-    // normalize: ensure trailing slash so relative assets behave
-    if (!u.pathname.endsWith("/")) u.pathname = u.pathname + "/";
     return u.toString();
   } catch {
     return DEFAULT_MINIAPP_URL;
@@ -2037,7 +2385,7 @@ function defaultUser(userId) {
     style: "پرایس اکشن",
     risk: "متوسط",
     newsEnabled: true,
-    promptMode: "style_plus_custom",
+    promptMode: "style_only",
 
     // usage quota
     dailyDate: kyivDateString(),
@@ -2072,6 +2420,11 @@ function defaultUser(userId) {
     },
 
     // referral / points / subscription
+    points: {
+      balance: 0,
+      spent: 0,
+      earnedFromInvites: 0,
+    },
     referral: {
       codes: [],            // 1 code
       referredBy: "",       // inviter userId
@@ -2117,6 +2470,7 @@ function patchUser(st, userId) {
   const d = defaultUser(userId);
   const merged = { ...d, ...st };
   merged.profile = { ...d.profile, ...(st?.profile || {}) };
+  merged.points = { ...d.points, ...(st?.points || {}) };
   merged.referral = { ...d.referral, ...(st?.referral || {}) };
   merged.subscription = { ...d.subscription, ...(st?.subscription || {}) };
   merged.wallet = { ...d.wallet, ...(st?.wallet || {}) };
@@ -2151,6 +2505,26 @@ async function ensureUser(userId, env, from) {
   const kvExisting = dbExisting ? null : await getUser(userId, env);
   const existing = dbExisting || kvExisting;
   let st = patchUser(existing || {}, userId);
+  // Initialize points for new users based on admin-configured base points
+  const basePts = await getBasePoints(env);
+  ensurePoints(st);
+
+  if (!existing) {
+    // brand-new user
+    st.points.balance = Number(basePts);
+    st.points.initialized = true;
+  } else {
+    // Backfill: if user has never received any points and balance is zero, treat as uninitialized and apply base once.
+    const spent = Number(st.points.spent || 0);
+    const earned = Number(st.points.earnedFromInvites || 0);
+    const bal = Number(st.points.balance || 0);
+
+    if (!st.points.initialized && bal === 0 && spent === 0 && earned === 0) {
+      st.points.balance = Number(basePts);
+      st.points.initialized = true;
+    }
+  }
+
 
   // one-way migrate KV -> D1 when BOT_DB is enabled
   if (env.BOT_DB && !dbExisting && kvExisting) {
@@ -2231,267 +2605,6 @@ async function tgSendMessage(env, chatId, text, replyMarkup) {
     reply_markup: replyMarkup,
     disable_web_page_preview: true,
   });
-}
-
-
-
-async function tgEditMessageText(env, chatId, messageId, text, replyMarkup) {
-  return tgApi(env, "editMessageText", {
-    chat_id: chatId,
-    message_id: messageId,
-    text: String(text).slice(0, 3900),
-    reply_markup: replyMarkup,
-    disable_web_page_preview: true,
-  });
-}
-
-async function tgAnswerCallbackQuery(env, callbackQueryId, text) {
-  return tgApi(env, "answerCallbackQuery", {
-    callback_query_id: callbackQueryId,
-    text: text ? String(text).slice(0, 180) : undefined,
-    show_alert: false,
-  });
-}
-
-function makeNonce(len = 10) {
-  const chars = "abcdefghijkmnpqrstuvwxyz23456789";
-  let out = "";
-  for (let i = 0; i < len; i++) out += chars[Math.floor(Math.random() * chars.length)];
-  return out;
-}
-
-
-async function saveBotNewsContext(env, symbol, articles, listText, listKb, ttlSec = 3600, nonce = null) {
-  if (!env?.BOT_KV) return null;
-  const n = nonce || makeNonce(10);
-  const key = `bot:newsctx:${n}`;
-  const payload = { symbol, articles, listText, listKb, savedAt: Date.now() };
-  await env.BOT_KV.put(
-    key,
-    JSON.stringify(payload),
-    { expirationTtl: Math.max(60, Math.min(ttlSec, 24 * 3600)) }
-  ).catch(() => {});
-  return n;
-}
-
-
-async function loadBotNewsContext(env, nonce) {
-  if (!env?.BOT_KV) return null;
-  const key = `bot:newsctx:${String(nonce || "").trim()}`;
-  const raw = await env.BOT_KV.get(key).catch(() => null);
-  if (!raw) return null;
-  try { return JSON.parse(raw); } catch { return null; }
-}
-
-
-function buildBotNewsKeyboard(env, nonce, symbol, articles) {
-  /** @type {any[][]} */
-  const rows = [];
-  const sym = String(symbol || "").toUpperCase();
-
-  rows.push([
-    { text: `💹 قیمت ${sym}`, callback_data: `nq|${nonce}` },
-    { text: "🔄 بروزرسانی", callback_data: `nr|${nonce}` },
-  ]);
-
-  try {
-    const url = getMiniappUrl(env);
-    if (url) rows.push([{ text: "📲 باز کردن مینی‌اپ", web_app: { url } }]);
-  } catch {}
-
-  const list = Array.isArray(articles) ? articles : [];
-  for (let i = 0; i < list.length; i++) {
-    const a = list[i] || {};
-    const row = /** @type {any[]} */ ([{ text: `🧠 ${sym} خبر ${i + 1}`, callback_data: `na|${nonce}|${i}` }]);
-    if (a.url) row.push({ text: `🔗 ${sym} خبر ${i + 1}`, url: String(a.url) });
-    rows.push(row);
-  }
-  return { inline_keyboard: rows };
-}
-
-function clampText(str, maxLen) {
-  const s = String(str || "");
-  if (s.length <= maxLen) return s;
-  return s.slice(0, Math.max(0, maxLen - 1)) + "…";
-}
-
-async function sendQuoteSnapshotMessage(env, chatId, userId, from, st, rawSymbol) {
-  const symbol = String(rawSymbol || "").trim().toUpperCase();
-  if (!isSymbol(symbol)) {
-    st.state = "choose_symbol_for_quote";
-    await saveUser(userId, st, env);
-    return tgSendMessage(env, chatId, "❌ نماد معتبر نیست. لطفاً یک نماد را برای قیمت لحظه‌ای انتخاب کن:", symbolPickerKeyboard());
-  }
-
-  const tf = String(st.timeframe || "H4").toUpperCase();
-  st.selectedSymbol = symbol;
-  st.state = "idle";
-  await saveUser(userId, st, env);
-
-  try {
-    const candles = await getMarketCandlesWithFallback(env, symbol, tf);
-    const snap = computeSnapshot(candles || []);
-    if (!snap) throw new Error("quote_unavailable");
-    const msgQ = `💹 قیمت لحظه‌ای
-
-نماد: ${symbol}
-TF: ${tf}
-قیمت: ${snap.lastPrice}
-تغییر: ${snap.changePct}%
-روند: ${snap.trend || "نامشخص"}`;
-    return tgSendMessage(env, chatId, msgQ, mainMenuKeyboard(env));
-  } catch (e) {
-    return tgSendMessage(env, chatId, `⚠️ قیمت لحظه‌ای برای ${symbol} در دسترس نیست. کمی بعد دوباره تلاش کن.`, mainMenuKeyboard(env));
-  }
-}
-
-async function sendNewsListMessage(env, chatId, userId, st, rawSymbol, rawLimit = 6) {
-  const symbol = String(rawSymbol || "").trim().toUpperCase();
-  if (!isSymbol(symbol)) {
-    st.state = "choose_symbol_for_news";
-    await saveUser(userId, st, env);
-    return tgSendMessage(env, chatId, "❌ نماد معتبر نیست. لطفاً یک نماد را برای اخبار انتخاب کن:", symbolPickerKeyboard());
-  }
-
-  let limit = Number(rawLimit);
-  if (!Number.isFinite(limit) || limit <= 0) limit = 6;
-  limit = Math.max(3, Math.min(10, Math.floor(limit)));
-
-  st.selectedSymbol = symbol;
-  st.state = "idle";
-  await saveUser(userId, st, env);
-
-  try {
-    const rows = await fetchSymbolNewsFa(symbol, limit, env);
-    const articles = (rows || []).slice(0, limit);
-    const lines = articles.map((x, i) => `${i + 1}) ${x.title || "-"}`).join("\n");
-    const listText = `📰 اخبار ${symbol}\n\n${lines || "خبری پیدا نشد."}\n\n💡 روی «تحلیل خبر» بزن تا همینجا تحلیل باز شود.`;
-    const nonce = makeNonce(10);
-    const keyb = buildBotNewsKeyboard(env, nonce, symbol, articles);
-    await saveBotNewsContext(env, symbol, articles, listText, keyb, 3600, nonce);
-    return tgSendMessage(env, chatId, listText, keyb);
-  } catch (e) {
-    return tgSendMessage(env, chatId, `⚠️ خبر مرتبط برای ${symbol} در دسترس نیست.`, mainMenuKeyboard(env));
-  }
-}
-
-async function handleCallbackQuery(cb, env) {
-  const data = String(cb.data || "");
-  const chatId = cb.message?.chat?.id;
-  const messageId = cb.message?.message_id;
-  const from = cb.from;
-  const userId = from?.id;
-  if (!chatId || !userId || !messageId) return;
-
-  // nl|<nonce> => back to list
-  if (data.startsWith("nl|")) {
-    const nonce = data.split("|")[1] || "";
-    const ctx = await loadBotNewsContext(env, nonce);
-    if (!ctx?.listText || !ctx?.listKb) {
-      await tgAnswerCallbackQuery(env, cb.id, "⏳ منقضی شد. دوباره /news را بزن.").catch(() => {});
-      return;
-    }
-    await tgAnswerCallbackQuery(env, cb.id, "").catch(() => {});
-    await tgEditMessageText(env, chatId, messageId, ctx.listText, ctx.listKb).catch(async () => {
-      await tgSendMessage(env, chatId, ctx.listText, ctx.listKb);
-    });
-    return;
-  }
-
-  // nr|<nonce> => refresh list
-  if (data.startsWith("nr|")) {
-    await tgAnswerCallbackQuery(env, cb.id, "در حال بروزرسانی…").catch(() => {});
-    const nonce = data.split("|")[1] || "";
-    const ctx = await loadBotNewsContext(env, nonce);
-    if (!ctx) {
-      await tgSendMessage(env, chatId, "⏳ این درخواست منقضی شده. دوباره /news را بزن.", mainMenuKeyboard(env));
-      return;
-    }
-    const symbol = String(ctx.symbol || "BTCUSDT").toUpperCase();
-    const limit = Array.isArray(ctx.articles) ? Math.max(3, Math.min(10, ctx.articles.length || 6)) : 6;
-    try {
-      const rows = await fetchSymbolNewsFa(symbol, limit, env);
-      const articles = (rows || []).slice(0, limit);
-      const lines = articles.map((x, i) => `${i + 1}) ${x.title || "-"}`).join("\n");
-      const listText = `📰 اخبار ${symbol}\n\n${lines || "خبری پیدا نشد."}\n\n💡 روی «تحلیل» بزن تا همینجا تحلیل باز شود.`;
-      const kb = buildBotNewsKeyboard(env, nonce, symbol, articles);
-      await saveBotNewsContext(env, symbol, articles, listText, kb, 3600, nonce);
-      await tgEditMessageText(env, chatId, messageId, listText, kb);
-    } catch (e) {
-      await tgAnswerCallbackQuery(env, cb.id, "⚠️ بروزرسانی ناموفق").catch(() => {});
-    }
-    return;
-  }
-
-  // nq|<nonce> => quote for this symbol (edit message)
-  if (data.startsWith("nq|")) {
-    await tgAnswerCallbackQuery(env, cb.id, "در حال دریافت قیمت…").catch(() => {});
-    const nonce = data.split("|")[1] || "";
-    const ctx = await loadBotNewsContext(env, nonce);
-    if (!ctx) {
-      await tgSendMessage(env, chatId, "⏳ این درخواست منقضی شده. دوباره /news را بزن.", mainMenuKeyboard(env));
-      return;
-    }
-    const symbol = String(ctx.symbol || "BTCUSDT").toUpperCase();
-    const st = await ensureUser(userId, env, from);
-    const tf = String(st.timeframe || "H4").toUpperCase();
-    try {
-      const candles = await getMarketCandlesWithFallback(env, symbol, tf);
-      const snap = computeSnapshot(candles || []);
-      if (!snap) throw new Error("quote_unavailable");
-      const txt = `💹 قیمت لحظه‌ای\n\nنماد: ${symbol}\nTF: ${tf}\nقیمت: ${snap.lastPrice}\nتغییر: ${snap.changePct}%\nروند: ${snap.trend || "نامشخص"}`;
-      const kb = {
-        inline_keyboard: [
-          [{ text: "⬅️ بازگشت به اخبار", callback_data: `nl|${nonce}` }, { text: "🔄 رفرش قیمت", callback_data: `nq|${nonce}` }],
-          [{ text: "📲 باز کردن مینی‌اپ", web_app: { url: getMiniappUrl(env) } }],
-        ],
-      };
-      await tgEditMessageText(env, chatId, messageId, txt, kb);
-    } catch (e) {
-      await tgAnswerCallbackQuery(env, cb.id, "⚠️ قیمت در دسترس نیست").catch(() => {});
-    }
-    return;
-  }
-
-  // na|<nonce>|<idx> => analyze one news item (edit message)
-  if (data.startsWith("na|")) {
-    await tgAnswerCallbackQuery(env, cb.id, "در حال تحلیل…").catch(() => {});
-    const parts = data.split("|");
-    const nonce = parts[1] || "";
-    const idx = Number(parts[2] || 0);
-    const ctx = await loadBotNewsContext(env, nonce);
-    if (!ctx || !Array.isArray(ctx.articles) || !ctx.articles[idx]) {
-      await tgSendMessage(env, chatId, "⏳ این درخواست منقضی شده. دوباره /news را بزن.", mainMenuKeyboard(env));
-      return;
-    }
-    const symbol = String(ctx.symbol || "").toUpperCase();
-    const article = ctx.articles[idx];
-    try {
-      const res = await getOrBuildNewsArticleAnalysis(symbol, article, env);
-      const header =
-        `🧠 تحلیل خبر ${symbol}\n\n` +
-        `📰 ${String(article?.title || "-")}\n` +
-        (article?.url ? (`🔗 ${String(article.url)}`) : "") +
-        `\n\n`;
-      const body = clampText(String(res.analysis || "تحلیل در دسترس نیست."), 3200);
-      const msg = header + body;
-
-      const buttons = [];
-      buttons.push([
-        { text: "⬅️ بازگشت به لیست", callback_data: `nl|${nonce}` },
-        { text: `💹 قیمت ${symbol}`, callback_data: `nq|${nonce}` },
-      ]);
-      if (article?.url) buttons.push([{ text: "🔗 باز کردن خبر", url: String(article.url) }]);
-      buttons.push([{ text: "📲 باز کردن مینی‌اپ", web_app: { url: getMiniappUrl(env) } }]);
-
-      await tgEditMessageText(env, chatId, messageId, msg, { inline_keyboard: buttons });
-    } catch (e) {
-      await tgAnswerCallbackQuery(env, cb.id, "⚠️ تحلیل در دسترس نیست").catch(() => {});
-    }
-    return;
-  }
-
-  await tgAnswerCallbackQuery(env, cb.id, "").catch(() => {});
 }
 
 async function tgSendLongMessage(env, chatId, text, replyMarkup) {
@@ -2670,11 +2783,10 @@ function extractImageFileId(msg, env) {
 
 function resolveTextProviderChain(env, orderOverride, prompt = "") {
   const raw = orderOverride || env.TEXT_PROVIDER_ORDER;
-  const base = [...new Set(parseOrder(raw, ["cf","openai","openrouter","deepseek","gemini"]))];
+  const base = [...new Set(parseOrder(raw, ["openai","openrouter","deepseek","gemini","cf"]))];
   if (base.length <= 1) return base;
-  const minuteBucket = Math.floor(Date.now() / 60000);
-  const promptSeed = String(prompt || "").slice(0, 64);
-  return rotateBySeed(base, `text|${promptSeed}|${minuteBucket}`);
+  const promptSeed = String(prompt || "").slice(0, 256);
+  return rotateBySeed(base, `text|${promptSeed}`);
 }
 
 function providerApiKey(name, env, seed = "") {
@@ -2729,7 +2841,7 @@ async function runPolishProviders(draft, env, orderOverride) {
   const chain = parseOrder(raw, ["openai","cf","gemini"]);
   const polishPrompt =
     `تو یک ویراستار سخت‌گیر فارسی هستی. متن زیر را فقط “سفت‌وسخت” کن:\n` +
-    `- فقط فارسی\n- قالب شماره‌دار ۱ تا ۵ حفظ شود\n- لحن افشاگر/تیز\n- اضافه‌گویی حذف\n- خیال‌بافی نکن\n\n` +
+    `- فقط فارسی\n- قالب شماره‌دار ۱ تا ۵ حفظ شود\n- لحن افشاگر/تیز\n- خیال‌بافی نکن\n\n` +
     `متن:\n${draft}`;
 
   for (const p of chain) {
@@ -2789,154 +2901,107 @@ async function textProvider(name, prompt, env) {
     const out = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
       messages: [{ role: "user", content: prompt }],
       max_tokens: 900,
-      temperature: 0.25,
+      temperature: 0,
     });
     return out?.response || out?.result || "";
   }
 
   if (name === "openai") {
-    const items = loadKeyItems(env, "openai");
-    if (!items.length) throw new Error("OPENAI_API_KEY_missing");
-    const model = String(env.OPENAI_MODEL || "gpt-4o-mini");
-    const timeoutMs = Number(env.LLM_TIMEOUT_MS || 12000);
+    const pool = parseApiKeyPool(env.OPENAI_API_KEY, env.OPENAI_API_KEYS);
+    if (!pool.length) throw new Error("OPENAI_API_KEY_missing");
 
-    const out = await withRotation("openai", env, items, async (it, ctx) => {
-      const base = String(it.baseUrl || "https://api.openai.com/v1").replace(/\/+$/, "");
-      const url = base + "/chat/completions";
-      const r = await fetchWithTimeout(url, {
+    // ✅ Rolling keys: اگر 429/401 خورد، با کلید بعدی امتحان کن
+    const minuteBucket = Math.floor(Date.now() / 60000);
+    const seed = `openai|${String(prompt || "").slice(0, 64)}|${minuteBucket}`;
+    const keys = rotateBySeed(pool, seed);
+
+    let lastStatus = 0;
+    let lastBody = null;
+    for (const apiKey of keys) {
+      const r = await fetchWithTimeout("https://api.openai.com/v1/chat/completions", {
         method: "POST",
         headers: {
+          Authorization: `Bearer ${apiKey}`,
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${it.key}`,
         },
         body: JSON.stringify({
-          model,
+          model: env.OPENAI_MODEL || "gpt-5",
           messages: [{ role: "user", content: prompt }],
-          temperature: 0.25,
+          temperature: 0,
         }),
-        signal: ctx.signal,
-      }, Math.min(timeoutMs, ctx.timeoutMs));
+      }, TIMEOUT_TEXT_MS);
 
-      if (!r.ok) {
-        const bodyText = await r.text().catch(() => "");
-        throw new HttpError(`openai_http_${r.status}`, r.status, r.headers, bodyText);
-      }
+      lastStatus = r.status;
       const j = await r.json().catch(() => null);
-      const txt = j?.choices?.[0]?.message?.content;
-      if (!txt) throw new Error("openai_no_content");
-      return String(txt);
-    }, { attempts: 3, timeoutMs });
+      lastBody = j;
+      const out = j?.choices?.[0]?.message?.content || "";
+      if (out && String(out).trim()) return out;
 
-    return out;
+      // only retry on rate/auth transient issues
+      if (![401, 429, 500, 502, 503, 504].includes(r.status)) break;
+    }
+    // include minimal error context
+    throw new Error(`openai_failed_status_${lastStatus}` + (lastBody?.error?.message ? `:${lastBody.error.message}` : ""));
   }
 
   if (name === "openrouter") {
-    const items = loadKeyItems(env, "openrouter");
-    if (!items.length) throw new Error("OPENROUTER_API_KEY_missing");
-    const model = String(env.OPENROUTER_MODEL || "openai/gpt-4o-mini");
-    const timeoutMs = Number(env.LLM_TIMEOUT_MS || 12000);
-
-    const out = await withRotation("openrouter", env, items, async (it, ctx) => {
-      const base = String(it.baseUrl || "https://openrouter.ai/api/v1").replace(/\/+$/, "");
-      const url = base + "/chat/completions";
-      const r = await fetchWithTimeout(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${it.key}`,
-          "HTTP-Referer": String(env.PUBLIC_BASE_URL || ""),
-          "X-Title": String(env.APP_NAME || "tg-bot"),
-        },
-        body: JSON.stringify({
-          model,
-          messages: [{ role: "user", content: prompt }],
-          temperature: 0.25,
-        }),
-        signal: ctx.signal,
-      }, Math.min(timeoutMs, ctx.timeoutMs));
-
-      if (!r.ok) {
-        const bodyText = await r.text().catch(() => "");
-        throw new HttpError(`openrouter_http_${r.status}`, r.status, r.headers, bodyText);
-      }
-      const j = await r.json().catch(() => null);
-      const txt = j?.choices?.[0]?.message?.content;
-      if (!txt) throw new Error("openrouter_no_content");
-      return String(txt);
-    }, { attempts: 3, timeoutMs });
-
-    return out;
+    const apiKey = providerApiKey("openrouter", env, prompt);
+    if (!apiKey) throw new Error("OPENROUTER_API_KEY_missing");
+    const r = await fetchWithTimeout("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: env.OPENROUTER_MODEL || "openai/gpt-4o-mini",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0,
+      }),
+    }, TIMEOUT_TEXT_MS);
+    const j = await r.json().catch(() => null);
+    return j?.choices?.[0]?.message?.content || "";
   }
 
   if (name === "deepseek") {
-    const items = loadKeyItems(env, "deepseek");
-    if (!items.length) throw new Error("DEEPSEEK_API_KEY_missing");
-    const model = String(env.DEEPSEEK_MODEL || "deepseek-chat");
-    const timeoutMs = Number(env.LLM_TIMEOUT_MS || 12000);
-
-    const out = await withRotation("deepseek", env, items, async (it, ctx) => {
-      const base = String(it.baseUrl || "https://api.deepseek.com/v1").replace(/\/+$/, "");
-      const url = base + "/chat/completions";
-      const r = await fetchWithTimeout(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${it.key}`,
-        },
-        body: JSON.stringify({
-          model,
-          messages: [{ role: "user", content: prompt }],
-          temperature: 0.25,
-        }),
-        signal: ctx.signal,
-      }, Math.min(timeoutMs, ctx.timeoutMs));
-
-      if (!r.ok) {
-        const bodyText = await r.text().catch(() => "");
-        throw new HttpError(`deepseek_http_${r.status}`, r.status, r.headers, bodyText);
-      }
-      const j = await r.json().catch(() => null);
-      const txt = j?.choices?.[0]?.message?.content;
-      if (!txt) throw new Error("deepseek_no_content");
-      return String(txt);
-    }, { attempts: 3, timeoutMs });
-
-    return out;
+    const apiKey = providerApiKey("deepseek", env, prompt);
+    if (!apiKey) throw new Error("DEEPSEEK_API_KEY_missing");
+    const r = await fetchWithTimeout("https://api.deepseek.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: env.DEEPSEEK_MODEL || "deepseek-chat",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0,
+      }),
+    }, TIMEOUT_TEXT_MS);
+    const j = await r.json().catch(() => null);
+    return j?.choices?.[0]?.message?.content || "";
   }
 
   if (name === "gemini") {
-    const items = loadKeyItems(env, "gemini");
-    if (!items.length) throw new Error("GEMINI_API_KEY_missing");
-    const model = String(env.GEMINI_MODEL || "gemini-1.5-flash");
-    const timeoutMs = Number(env.LLM_TIMEOUT_MS || 12000);
-
-    const out = await withRotation("gemini", env, items, async (it, ctx) => {
-      const base = String(it.baseUrl || "https://generativelanguage.googleapis.com").replace(/\/+$/, "");
-      const url = `${base}/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(it.key)}`;
-      const r = await fetchWithTimeout(url, {
+    const apiKey = providerApiKey("gemini", env, prompt);
+    if (!apiKey) throw new Error("GEMINI_API_KEY_missing");
+    const r = await fetchWithTimeout(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`,
+      {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.25 },
+          generationConfig: { temperature: 0, maxOutputTokens: 900 },
         }),
-        signal: ctx.signal,
-      }, Math.min(timeoutMs, ctx.timeoutMs));
-
-      if (!r.ok) {
-        const bodyText = await r.text().catch(() => "");
-        throw new HttpError(`gemini_http_${r.status}`, r.status, r.headers, bodyText);
-      }
-      const j = await r.json().catch(() => null);
-      const txt = j?.candidates?.[0]?.content?.parts?.map((p) => p?.text).filter(Boolean).join("\n");
-      if (!txt) throw new Error("gemini_no_content");
-      return String(txt);
-    }, { attempts: 3, timeoutMs });
-
-    return out;
+      },
+      TIMEOUT_TEXT_MS
+    );
+    const j = await r.json().catch(() => null);
+    return j?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") || "";
   }
 
-  throw new Error("unknown_text_provider");
+  throw new Error(`unknown_text_provider:${name}`);
 }
 
 async function ensureImageCache(imageUrl, env, getCache, setCache) {
@@ -2976,13 +3041,9 @@ async function visionProvider(name, imageUrl, visionPrompt, env, getCache, setCa
   name = String(name || "").toLowerCase();
 
   if (name === "openai") {
-    const items = loadKeyItems(env, "openai_vision");
-    if (!items.length) throw new Error("OPENAI_API_KEY_missing");
-    const model = String(env.OPENAI_VISION_MODEL || env.OPENAI_MODEL || "gpt-4o-mini");
-    const timeoutMs = Number(env.VISION_TIMEOUT_MS || TIMEOUT_VISION_MS);
-
+    if (!providerApiKey("openai", env, imageUrl) && !env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY_missing");
     const body = {
-      model,
+      model: env.OPENAI_MODEL || "gpt-4o-mini",
       messages: [{
         role: "user",
         content: [
@@ -2990,31 +3051,18 @@ async function visionProvider(name, imageUrl, visionPrompt, env, getCache, setCa
           { type: "image_url", image_url: { url: imageUrl } },
         ],
       }],
-      temperature: 0.2,
+      temperature: 0,
     };
-
-    const out = await withRotation("openai_vision", env, items, async (it, ctx) => {
-      const base = String(it.baseUrl || "https://api.openai.com/v1").replace(/\/+$/, "");
-      const url = base + "/chat/completions";
-      const r = await fetchWithTimeout(url, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${it.key}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(body),
-        signal: ctx.signal,
-      }, Math.min(timeoutMs, ctx.timeoutMs));
-
-      if (!r.ok) {
-        const bodyText = await r.text().catch(() => "");
-        throw new HttpError(`openai_vision_http_${r.status}`, r.status, r.headers, bodyText);
-      }
-      const j = await r.json().catch(() => null);
-      return j?.choices?.[0]?.message?.content || "";
-    }, { attempts: 3, timeoutMs });
-
-    return String(out || "");
+    const r = await fetchWithTimeout("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${providerApiKey("openai", env, imageUrl) || env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    }, TIMEOUT_VISION_MS);
+    const j = await r.json().catch(() => null);
+    return j?.choices?.[0]?.message?.content || "";
   }
 
   if (name === "cf") {
@@ -3026,18 +3074,12 @@ async function visionProvider(name, imageUrl, visionPrompt, env, getCache, setCa
   }
 
   if (name === "gemini") {
-    const items = loadKeyItems(env, "gemini");
-    if (!items.length) throw new Error("GEMINI_API_KEY_missing");
-    const model = String(env.GEMINI_VISION_MODEL || "gemini-1.5-flash");
-    const timeoutMs = Number(env.VISION_TIMEOUT_MS || TIMEOUT_VISION_MS);
-
+    if (!providerApiKey("gemini", env, imageUrl) && !env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY_missing");
     const c = await ensureImageCache(imageUrl, env, getCache, setCache);
     if (c.tooLarge) return "";
-
-    const out = await withRotation("gemini_vision", env, items, async (it, ctx) => {
-      const base = String(it.baseUrl || "https://generativelanguage.googleapis.com").replace(/\/+$/, "");
-      const url = `${base}/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(it.key)}`;
-      const r = await fetchWithTimeout(url, {
+    const r = await fetchWithTimeout(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(providerApiKey("gemini", env, imageUrl) || env.GEMINI_API_KEY || "")}`,
+      {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -3047,53 +3089,35 @@ async function visionProvider(name, imageUrl, visionPrompt, env, getCache, setCa
               { inlineData: { mimeType: c.mime, data: c.base64 } },
             ],
           }],
-          generationConfig: { temperature: 0.2, maxOutputTokens: 900 },
+          generationConfig: { temperature: 0, maxOutputTokens: 900 },
         }),
-        signal: ctx.signal,
-      }, Math.min(timeoutMs, ctx.timeoutMs));
-
-      if (!r.ok) {
-        const bodyText = await r.text().catch(() => "");
-        throw new HttpError(`gemini_vision_http_${r.status}`, r.status, r.headers, bodyText);
-      }
-      const j = await r.json().catch(() => null);
-      return j?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") || "";
-    }, { attempts: 3, timeoutMs });
-
-    return String(out || "");
+      },
+      TIMEOUT_VISION_MS
+    );
+    const j = await r.json().catch(() => null);
+    return j?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") || "";
   }
 
   if (name === "hf") {
-    const items = loadKeyItems(env, "hf");
-    if (!items.length) throw new Error("HF_API_KEY_missing");
-    const model = String(env.HF_VISION_MODEL || "Salesforce/blip-image-captioning-large").trim();
-    const timeoutMs = Number(env.VISION_TIMEOUT_MS || TIMEOUT_VISION_MS);
-
+    if (!env.HF_API_KEY) throw new Error("HF_API_KEY_missing");
+    const model = (env.HF_VISION_MODEL || "Salesforce/blip-image-captioning-large").toString().trim();
     const c = await ensureImageCache(imageUrl, env, getCache, setCache);
     if (c.tooLarge) return "";
-
-    const out = await withRotation("hf_vision", env, items, async (it, ctx) => {
-      const url = `https://api-inference.huggingface.co/models/${encodeURIComponent(model)}`;
-      const r = await fetchWithTimeout(url, {
+    const r = await fetchWithTimeout(
+      `https://api-inference.huggingface.co/models/${encodeURIComponent(model)}`,
+      {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${it.key}`,
+          Authorization: `Bearer ${env.HF_API_KEY}`,
           "Content-Type": "application/octet-stream",
         },
         body: c.u8,
-        signal: ctx.signal,
-      }, Math.min(timeoutMs, ctx.timeoutMs));
-
-      if (!r.ok) {
-        const bodyText = await r.text().catch(() => "");
-        throw new HttpError(`hf_vision_http_${r.status}`, r.status, r.headers, bodyText);
-      }
-      const j = await r.json().catch(() => null);
-      const txt = Array.isArray(j) ? j?.[0]?.generated_text : (j?.generated_text || j?.text);
-      return txt ? String(txt) : "";
-    }, { attempts: 3, timeoutMs });
-
-    return String(out || "");
+      },
+      TIMEOUT_VISION_MS
+    );
+    const j = await r.json().catch(() => null);
+    const txt = Array.isArray(j) ? j?.[0]?.generated_text : (j?.generated_text || j?.text);
+    return txt ? String(txt) : "";
   }
 
   throw new Error(`unknown_vision_provider:${name}`);
@@ -3111,9 +3135,10 @@ function assetKind(symbol) {
 function providerSupportsSymbol(provider, symbol, env) {
   const kind = assetKind(symbol);
   if (provider === "binance") return kind === "crypto";
-  if (provider === "twelvedata") return loadKeyItems(env, "twelvedata").length > 0 && ["crypto", "forex", "metal"].includes(kind);
-  if (provider === "alphavantage") return loadKeyItems(env, "alphavantage").length > 0 && ["forex", "metal"].includes(kind);
-  if (provider === "finnhub") return loadKeyItems(env, "finnhub").length > 0 && kind === "forex";
+  if (provider === "twelvedata") return !!(env.TWELVEDATA_API_KEY || env.TWELVEDATA_API_KEYS) && ["crypto", "forex", "metal"].includes(kind);
+  if (provider === "alphavantage") return !!(env.ALPHAVANTAGE_API_KEY || env.ALPHAVANTAGE_API_KEYS) && ["forex", "metal"].includes(kind);
+  if (provider === "finnhub") return !!(env.FINNHUB_API_KEY || env.FINNHUB_API_KEYS) && kind === "forex";
+  if (provider === "cryptocompare") return ["crypto"].includes(kind);
   if (provider === "yahoo") return true;
   return true;
 }
@@ -3125,471 +3150,6 @@ function parseApiKeyPool(primary, many) {
   const list = String(many || "").split(",").map((x) => x.trim()).filter(Boolean);
   for (const k of list) if (!arr.includes(k)) arr.push(k);
   return arr;
-}
-
-/* ========================== ROTATION ENGINE (API Rotation + Failover + Rate-limit aware) ========================== */
-class HttpError extends Error {
-  constructor(message, status, headers, bodyText) {
-    super(message);
-    this.name = "HttpError";
-    this.status = Number(status || 0) || 0;
-    this.headers = headers || null;
-    this.bodyText = bodyText || "";
-  }
-}
-
-function parseRetryAfterSec(headers) {
-  try {
-    const ra = headers?.get?.("retry-after");
-    if (!ra) return null;
-    const n = Number(ra);
-    if (Number.isFinite(n) && n > 0) return Math.min(24 * 3600, Math.max(1, Math.floor(n)));
-    const dt = Date.parse(ra);
-    if (Number.isFinite(dt)) {
-      const sec = Math.floor((dt - Date.now()) / 1000);
-      if (sec > 0) return Math.min(24 * 3600, sec);
-    }
-  } catch {}
-  return null;
-}
-
-function normalizeFailure(err) {
-  // Return { type, retryAfterSec, status }
-  if (err && err.name === "AbortError") return { type: "timeout" };
-  if (err instanceof HttpError) {
-    const st = err.status;
-    const ra = parseRetryAfterSec(err.headers) || null;
-    if (st === 401 || st === 403) return { type: "auth", status: st };
-    if (st === 429) return { type: "rate", status: st, retryAfterSec: ra || 90 };
-    if (st >= 500) return { type: "server", status: st };
-    return { type: "unknown", status: st };
-  }
-  const msg = String(err?.message || err || "");
-  if (/rate\s*limit|too\s*many\s*request|429/i.test(msg)) return { type: "rate", retryAfterSec: 90 };
-  if (/timeout|timed\s*out|AbortError/i.test(msg)) return { type: "timeout" };
-  return { type: "unknown" };
-}
-
-function ewma(prev, value, alpha = 0.25) {
-  if (!Number.isFinite(value)) return prev;
-  if (!Number.isFinite(prev) || prev <= 0) return value;
-  return prev + alpha * (value - prev);
-}
-
-class RotatingPool {
-  /**
-   * @param {{items?: any[]; strategy?: string; keyFn?: (item:any)=>string; cooldownMs?: number; maxConsecutiveFails?: number; successReset?: boolean}} [opts]
-   */
-  constructor({ items = [], strategy = "round_robin", keyFn = undefined, cooldownMs = 30000, maxConsecutiveFails = 2, successReset = true } = {}) {
-    this.strategy = strategy || "round_robin";
-    this.keyFn = keyFn || ((it) => String(it?.key || it?.url || it?.id || JSON.stringify(it)));
-    this.cooldownMs = Math.max(1000, Number(cooldownMs || 0) || 30000);
-    this.maxConsecutiveFails = Math.max(1, Number(maxConsecutiveFails || 0) || 2);
-    this.successReset = successReset !== false;
-
-    this.items = Array.isArray(items) ? items.slice() : [];
-    this.state = {}; // id -> stats
-    this.rrIndex = 0;
-    this.wrr = {}; // id -> currentWeight (smooth WRR)
-    this.lastSyncedAt = 0;
-    this.version = 2;
-
-    this._ensureState();
-  }
-
-  _ensureState() {
-    const now = Date.now();
-    for (const it of this.items) {
-      const id = this.keyFn(it);
-      if (!this.state[id]) {
-        this.state[id] = { failCount: 0, consecutiveFails: 0, lastFailAt: 0, blockedUntil: 0, lastUsedAt: 0, successCount: 0, avgLatencyMs: 0 };
-      }
-      if (!this.wrr[id]) this.wrr[id] = 0;
-      // cleanup impossible timestamps
-      if (!Number.isFinite(this.state[id].blockedUntil)) this.state[id].blockedUntil = 0;
-      if (!Number.isFinite(this.state[id].lastUsedAt)) this.state[id].lastUsedAt = 0;
-      if (this.state[id].blockedUntil < 0) this.state[id].blockedUntil = 0;
-    }
-    // prune old state for removed items
-    const keep = new Set(this.items.map((it) => this.keyFn(it)));
-    for (const id of Object.keys(this.state)) {
-      if (!keep.has(id)) delete this.state[id];
-    }
-    for (const id of Object.keys(this.wrr)) {
-      if (!keep.has(id)) delete this.wrr[id];
-    }
-    // avoid empty
-    if (!this.items.length) this.items = [];
-  }
-
-  isBlocked(item) {
-    const id = this.keyFn(item);
-    const st = this.state[id];
-    return !!(st && st.blockedUntil && Date.now() < st.blockedUntil);
-  }
-
-  _unblockedItems() {
-    const now = Date.now();
-    return this.items.filter((it) => (this.state[this.keyFn(it)]?.blockedUntil || 0) <= now);
-  }
-
-  next() {
-    this._ensureState();
-    const now = Date.now();
-    const candidates = this._unblockedItems();
-    const chooseFrom = candidates.length ? candidates : this.items.slice(); // panic mode: ignore blocks
-    if (!chooseFrom.length) throw new Error("rotation_no_items");
-
-    let item = null;
-    if (this.strategy === "least_recently_used") {
-      let best = null;
-      let bestUsed = Infinity;
-      for (const it of chooseFrom) {
-        const id = this.keyFn(it);
-        const used = this.state[id]?.lastUsedAt || 0;
-        if (used < bestUsed) { bestUsed = used; best = it; }
-      }
-      item = best || chooseFrom[0];
-    } else if (this.strategy === "weighted_round_robin" || this.strategy === "random_weighted") {
-      // weights default to 1
-      const weights = chooseFrom.map((it) => Math.max(1, Number(it?.weight || 1) || 1));
-      if (this.strategy === "random_weighted") {
-        const total = weights.reduce((a, b) => a + b, 0);
-        let r = Math.random() * total;
-        for (let i = 0; i < chooseFrom.length; i++) {
-          r -= weights[i];
-          if (r <= 0) { item = chooseFrom[i]; break; }
-        }
-        if (!item) item = chooseFrom[chooseFrom.length - 1];
-      } else {
-        // smooth weighted round robin
-        let bestIdx = 0;
-        let bestVal = -Infinity;
-        const total = weights.reduce((a, b) => a + b, 0);
-        for (let i = 0; i < chooseFrom.length; i++) {
-          const it = chooseFrom[i];
-          const id = this.keyFn(it);
-          this.wrr[id] = (this.wrr[id] || 0) + weights[i];
-          if (this.wrr[id] > bestVal) { bestVal = this.wrr[id]; bestIdx = i; }
-        }
-        item = chooseFrom[bestIdx];
-        const bestId = this.keyFn(item);
-        this.wrr[bestId] = (this.wrr[bestId] || 0) - total;
-      }
-    } else {
-      // round robin
-      const idx = this.rrIndex % chooseFrom.length;
-      item = chooseFrom[idx];
-      this.rrIndex = (this.rrIndex + 1) % Math.max(1, chooseFrom.length);
-    }
-
-    const id = this.keyFn(item);
-    if (this.state[id]) this.state[id].lastUsedAt = now;
-    return item;
-  }
-
-  reportSuccess(item, meta = {}) {
-    const id = this.keyFn(item);
-    const st = this.state[id] || (this.state[id] = {});
-    st.successCount = (st.successCount || 0) + 1;
-    if (this.successReset) st.consecutiveFails = 0;
-    if (meta && Number.isFinite(meta.latencyMs)) st.avgLatencyMs = ewma(st.avgLatencyMs || 0, meta.latencyMs);
-  }
-
-  reportFailure(item, failure, meta = {}) {
-    const id = this.keyFn(item);
-    const st = this.state[id] || (this.state[id] = {});
-    st.failCount = (st.failCount || 0) + 1;
-    st.consecutiveFails = (st.consecutiveFails || 0) + 1;
-    st.lastFailAt = Date.now();
-    if (meta && Number.isFinite(meta.latencyMs)) st.avgLatencyMs = ewma(st.avgLatencyMs || 0, meta.latencyMs);
-
-    const type = String(failure?.type || "unknown");
-    let blockMs = 0;
-
-    if (type === "auth") blockMs = 6 * 3600 * 1000; // likely bad key
-    else if (type === "rate") {
-      const ra = Number(failure?.retryAfterSec || 0) || 90;
-      const backoff = Math.min(180, Math.max(30, ra)) * 1000;
-      const extra = Math.min(180, (st.consecutiveFails || 1) * 20) * 1000;
-      blockMs = backoff + extra;
-    } else if (type === "timeout") blockMs = Math.min(120000, Math.max(15000, this.cooldownMs));
-    else if (type === "server") blockMs = Math.min(90000, Math.max(5000, Math.floor(this.cooldownMs / 2)));
-    else blockMs = Math.min(60000, Math.max(5000, Math.floor(this.cooldownMs / 2)));
-
-    if ((st.consecutiveFails || 0) >= this.maxConsecutiveFails) {
-      blockMs = Math.max(blockMs, this.cooldownMs);
-    }
-
-    st.blockedUntil = Math.max(Number(st.blockedUntil || 0), Date.now() + blockMs);
-  }
-
-  snapshot() {
-    return {
-      version: this.version,
-      strategy: this.strategy,
-      rrIndex: this.rrIndex,
-      cooldownMs: this.cooldownMs,
-      maxConsecutiveFails: this.maxConsecutiveFails,
-      successReset: this.successReset,
-      items: this.items.map((it) => ({ ...it })), // shallow
-      state: this.state,
-      wrr: this.wrr,
-      savedAt: Date.now(),
-    };
-  }
-
-  restore(snapshot) {
-    try {
-      if (!snapshot || typeof snapshot !== "object") return;
-      if (snapshot.version !== 2) return;
-      this.strategy = snapshot.strategy || this.strategy;
-      this.rrIndex = Number(snapshot.rrIndex || 0) || 0;
-      this.cooldownMs = Number(snapshot.cooldownMs || this.cooldownMs) || this.cooldownMs;
-      this.maxConsecutiveFails = Number(snapshot.maxConsecutiveFails || this.maxConsecutiveFails) || this.maxConsecutiveFails;
-      this.successReset = snapshot.successReset !== false;
-      this.state = snapshot.state || this.state || {};
-      this.wrr = snapshot.wrr || this.wrr || {};
-      this._ensureState();
-    } catch {}
-  }
-}
-
-function getRotationKV(env) {
-  return env.ROTATION_KV || env.BOT_KV || null;
-}
-
-function safeParseJsonArray(raw) {
-  try {
-    const j = JSON.parse(String(raw || ""));
-    return Array.isArray(j) ? j : null;
-  } catch {
-    return null;
-  }
-}
-
-function normalizeItems(items, kind) {
-  const out = [];
-  for (const it of (Array.isArray(items) ? items : [])) {
-    if (kind === "key") {
-      const key = String(it?.key || "").trim();
-      if (!key) continue;
-      const weight = Math.max(1, Number(it?.weight || 1) || 1);
-      const baseUrl = String(it?.baseUrl || "").trim();
-      out.push({ key, weight, ...(baseUrl ? { baseUrl } : {}) });
-    } else if (kind === "url") {
-      const url = String(it?.url || "").trim();
-      if (!url) continue;
-      const weight = Math.max(1, Number(it?.weight || 1) || 1);
-      out.push({ url, weight });
-    }
-  }
-  return out;
-}
-
-function loadKeyItems(env, service) {
-  const s = String(service || "").toLowerCase();
-  const map = {
-    openai: ["OPENAI_KEYS_JSON", env.OPENAI_API_KEY, env.OPENAI_API_KEYS],
-    openrouter: ["OPENROUTER_KEYS_JSON", env.OPENROUTER_API_KEY, env.OPENROUTER_API_KEYS],
-    deepseek: ["DEEPSEEK_KEYS_JSON", env.DEEPSEEK_API_KEY, env.DEEPSEEK_API_KEYS],
-    gemini: ["GEMINI_KEYS_JSON", env.GEMINI_API_KEY, env.GEMINI_API_KEYS],
-    twelvedata: ["TWELVEDATA_KEYS_JSON", env.TWELVEDATA_API_KEY, env.TWELVEDATA_API_KEYS],
-    alphavantage: ["ALPHAVANTAGE_KEYS_JSON", env.ALPHAVANTAGE_API_KEY, env.ALPHAVANTAGE_API_KEYS],
-    finnhub: ["FINNHUB_KEYS_JSON", env.FINNHUB_API_KEY, env.FINNHUB_API_KEYS],
-    hf: ["HF_KEYS_JSON", env.HF_API_KEY, ""],
-    openai_vision: ["OPENAI_VISION_KEYS_JSON", env.OPENAI_API_KEY, env.OPENAI_API_KEYS],
-  };
-  const cfg = map[s];
-  if (!cfg) return [];
-  const jsonVar = cfg[0];
-  const arr = safeParseJsonArray(env[jsonVar]);
-  if (arr) return normalizeItems(arr, "key");
-  // legacy fallback (comma-separated list)
-  const legacyOne = String(cfg[1] || "").trim();
-  const legacyMany = String(cfg[2] || "").split(",").map((x) => x.trim()).filter(Boolean);
-  const dedup = [];
-  if (legacyOne) dedup.push({ key: legacyOne, weight: 1 });
-  for (const k of legacyMany) if (k && !dedup.some((x) => x.key === k)) dedup.push({ key: k, weight: 1 });
-  return dedup;
-}
-
-function loadUrlItems(env, service, fallbackUrls = []) {
-  const s = String(service || "").toLowerCase();
-  const map = {
-    blockchain: "BLOCKCHAIN_ENDPOINTS_JSON",
-    quickchart: "QUICKCHART_ENDPOINTS_JSON",
-    binance: "BINANCE_ENDPOINTS_JSON",
-    yahoo: "YAHOO_ENDPOINTS_JSON",
-    news: "NEWS_FEEDS_JSON",
-  };
-  const jsonVar = map[s];
-  const arr = jsonVar ? safeParseJsonArray(env[jsonVar]) : null;
-  if (arr) return normalizeItems(arr, "url");
-  return (Array.isArray(fallbackUrls) ? fallbackUrls : []).map((u) => ({ url: String(u), weight: 1 })).filter((x) => x.url);
-}
-
-function validateRotationConfig(env) {
-  if (globalThis.__ROT_CFG_VALIDATED__) return;
-  globalThis.__ROT_CFG_VALIDATED__ = true;
-
-  const jsonVars = [
-    "OPENAI_KEYS_JSON",
-    "OPENROUTER_KEYS_JSON",
-    "DEEPSEEK_KEYS_JSON",
-    "GEMINI_KEYS_JSON",
-    "TWELVEDATA_KEYS_JSON",
-    "ALPHAVANTAGE_KEYS_JSON",
-    "FINNHUB_KEYS_JSON",
-    "HF_KEYS_JSON",
-    "BLOCKCHAIN_ENDPOINTS_JSON",
-    "QUICKCHART_ENDPOINTS_JSON",
-    "NEWS_FEEDS_JSON",
-    "BINANCE_ENDPOINTS_JSON",
-    "YAHOO_ENDPOINTS_JSON",
-  ];
-
-  for (const v of jsonVars) {
-    const raw = env?.[v];
-    if (!raw) continue;
-    const arr = safeParseJsonArray(raw);
-    if (!arr) {
-      console.error(`[rot] invalid JSON in ${v}`);
-      continue;
-    }
-    for (const it of arr) {
-      const w = Number(it?.weight ?? 1);
-      if (!(w > 0)) console.error(`[rot] invalid weight in ${v}`);
-      if (v.endsWith("_ENDPOINTS_JSON") || v === "NEWS_FEEDS_JSON" || v === "BINANCE_ENDPOINTS_JSON" || v === "YAHOO_ENDPOINTS_JSON" || v === "QUICKCHART_ENDPOINTS_JSON") {
-        if (!String(it?.url || "").trim()) console.error(`[rot] missing url in ${v}`);
-      } else {
-        if (!String(it?.key || "").trim()) console.error(`[rot] missing key in ${v}`);
-      }
-    }
-  }
-}
-
-function poolKeyFn(item) {
-  return String(item?.key || item?.url || "");
-}
-
-async function getPool(env, serviceName, items, opts = {}) {
-  const kv = getRotationKV(env);
-  const key = `rot:${serviceName}`;
-  const cache = globalThis.__ROTATION_POOLS__ || (globalThis.__ROTATION_POOLS__ = new Map());
-
-  const itemSig = items.map((it) => poolKeyFn(it)).join("|");
-  const cacheKey = `${serviceName}|${itemSig}`;
-
-  let entry = cache.get(cacheKey);
-  if (!entry) {
-    const pool = new RotatingPool({
-      items,
-      strategy: opts.strategy || (items.some((x) => Number(x?.weight || 1) !== 1) ? "weighted_round_robin" : "round_robin"),
-      keyFn: poolKeyFn,
-      cooldownMs: opts.cooldownMs || 30000,
-      maxConsecutiveFails: opts.maxConsecutiveFails || 2,
-      successReset: opts.successReset !== false,
-    });
-
-    entry = { pool, key, kv, ttlSec: Number(opts.ttlSec || 0) || 600, lastLoadAt: 0 };
-    cache.set(cacheKey, entry);
-  }
-
-  // best-effort load from KV (rare)
-  if (entry.kv && (Date.now() - entry.lastLoadAt > 2000)) {
-    entry.lastLoadAt = Date.now();
-    const raw = await entry.kv.get(entry.key).catch(() => null);
-    const snap = raw ? safeJsonParse(raw) : null;
-    if (snap) entry.pool.restore(snap);
-  }
-  // always merge current items
-  entry.pool.items = items.slice();
-  entry.pool._ensureState();
-  return entry;
-}
-
-async function persistPool(entry) {
-  if (!entry?.kv) return;
-  try {
-    await entry.kv.put(entry.key, JSON.stringify(entry.pool.snapshot()), { expirationTtl: entry.ttlSec || 600 });
-  } catch {}
-}
-
-async function bumpRotMetric(env, serviceName, metric) {
-  const kv = getRotationKV(env);
-  if (!kv) return;
-  const key = `rotm:${serviceName}:${metric}`;
-  try {
-    const cur = Number(await kv.get(key)) || 0;
-    await kv.put(key, String(cur + 1), { expirationTtl: 24 * 3600 });
-  } catch {}
-}
-
-class RotatedAggregateError extends Error {
-  constructor(serviceName, errors) {
-    super(`rotation_all_failed:${serviceName}`);
-    this.name = "RotatedAggregateError";
-    this.serviceName = serviceName;
-    this.errors = errors || [];
-  }
-}
-
-async function withRotation(serviceName, env, items, callFn, options = {}) {
-  const requestId = options.requestId || (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2));
-  const attempts = Math.max(1, Number(options.attempts || 0) || 3);
-  const timeoutMs = Math.max(1000, Number(options.timeoutMs || 0) || 8000);
-  const totalBudgetMs = Math.max(timeoutMs, Number(options.totalBudgetMs || 0) || (attempts * timeoutMs));
-
-  if (!Array.isArray(items) || !items.length) throw new Error(`rotation_no_items:${serviceName}`);
-
-  const entry = await getPool(env, serviceName, items, options);
-  const pool = entry.pool;
-
-  const errs = [];
-  const startedAll = Date.now();
-  for (let i = 0; i < attempts; i++) {
-    const item = pool.next();
-    const idx = i + 1;
-    const started = Date.now();
-
-    const elapsedAll = Date.now() - startedAll;
-    const remainingMs = totalBudgetMs - elapsedAll;
-    if (remainingMs <= 200) break;
-    const attemptTimeoutMs = Math.max(500, Math.min(timeoutMs, remainingMs));
-
-    const ac = new AbortController();
-    const t = setTimeout(() => ac.abort(), attemptTimeoutMs);
-    try {
-      const ret = await callFn(item, { requestId, attempt: idx, signal: ac.signal, timeoutMs: attemptTimeoutMs });
-      const latencyMs = Date.now() - started;
-      pool.reportSuccess(item, { latencyMs });
-      bumpRotMetric(env, serviceName, "success");
-      console.log(`[rot] ok service=${serviceName} attempt=${idx} latencyMs=${latencyMs} rid=${requestId}`);
-      await persistPool(entry);
-      return ret;
-    } catch (e) {
-      const latencyMs = Date.now() - started;
-      const failure = (options.classifyFailure ? await options.classifyFailure(e) : null) || normalizeFailure(e);
-      pool.reportFailure(item, failure, { latencyMs });
-      bumpRotMetric(env, serviceName, "fail");
-      if (failure?.type === "rate") bumpRotMetric(env, serviceName, "429");
-
-      errs.push({ attempt: idx, failure, message: String(e?.message || e), status: e?.status || e?.cause?.status || 0 });
-      console.warn(`[rot] fail service=${serviceName} attempt=${idx} type=${failure?.type || "unknown"} latencyMs=${latencyMs} rid=${requestId} err=${String(e?.message || e)}`);
-
-      const shouldRetry = options.shouldRetry
-        ? !!options.shouldRetry(e, failure)
-        : !(failure?.type === "auth");
-
-      if (!shouldRetry) break;
-    } finally {
-      clearTimeout(t);
-    }
-  }
-
-  await persistPool(entry);
-  throw new RotatedAggregateError(serviceName, errs);
 }
 
 function stableHashInt(s) {
@@ -3614,13 +3174,36 @@ function pickApiKey(pool, seed) {
 }
 
 function resolveMarketProviderChain(env, symbol, timeframe = "H4") {
-  const desired = parseOrder(env.MARKET_DATA_PROVIDER_ORDER, ["binance","twelvedata","alphavantage","finnhub","yahoo"]);
+  const desired = parseOrder(env.MARKET_DATA_PROVIDER_ORDER, ["binance","cryptocompare","twelvedata","alphavantage","finnhub","yahoo"]);
   const filtered = desired.filter((p) => providerSupportsSymbol(p, symbol, env));
   const chain = filtered.length ? filtered : ["yahoo"];
-  const minuteBucket = Math.floor(Date.now() / 60000);
-  return rotateBySeed(chain, `${symbol}|${timeframe}|${minuteBucket}`);
+  return rotateBySeed(chain, `${symbol}|${timeframe}`);
 }
 
+
+function mapTimeframeToCryptoCompare(tf) {
+  // CryptoCompare supports: histominute, histohour, histoday
+  // We'll emulate H4 with histohour + aggregate=4.
+  if (tf === "M15") return { endpoint: "histominute", aggregate: 15 };
+  if (tf === "H1") return { endpoint: "histohour", aggregate: 1 };
+  if (tf === "H4") return { endpoint: "histohour", aggregate: 4 };
+  if (tf === "D1") return { endpoint: "histoday", aggregate: 1 };
+  return { endpoint: "histohour", aggregate: 4 };
+}
+
+function mapSymbolToCryptoComparePair(symbol) {
+  // Supports crypto pairs like BTCUSDT, ETHUSDT, BTCUSD, etc.
+  const s = String(symbol || "").toUpperCase().trim();
+  if (s.endsWith("USDT")) return { fsym: s.slice(0, -4), tsym: "USD" }; // USDT approximated as USD
+  if (s.endsWith("USD")) return { fsym: s.slice(0, -3), tsym: "USD" };
+  if (s.endsWith("USDC")) return { fsym: s.slice(0, -4), tsym: "USD" };
+  // fallback: try split by '-'
+  if (s.includes("-")) {
+    const [a, b] = s.split("-");
+    if (a && b) return { fsym: a, tsym: b };
+  }
+  return { fsym: s.slice(0, 3), tsym: "USD" };
+}
 function mapTimeframeToBinance(tf) {
   const m = { M15: "15m", H1: "1h", H4: "4h", D1: "1d" };
   return m[tf] || "4h";
@@ -3674,160 +3257,127 @@ function downsampleCandles(candles, groupSize) {
   return out;
 }
 
-async function fetchBinanceCandles(symbol, timeframe, limit, timeoutMs, env) {
+async function fetchBinanceCandles(symbol, timeframe, limit, timeoutMs) {
   if (!symbol.endsWith("USDT")) throw new Error("binance_not_crypto");
   const interval = mapTimeframeToBinance(timeframe);
-
-  const fallbackUrls = [
+  const urls = [
     `https://api.binance.com/api/v3/klines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${limit}`,
     `https://data-api.binance.vision/api/v3/klines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${limit}`,
     `https://api.binance.us/api/v3/klines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${limit}`,
   ];
-
-  const items = loadUrlItems(env || {}, "binance", fallbackUrls);
-  const out = await withRotation("binance", env || {}, items, async (it, ctx) => {
-    const r = await fetchWithTimeout(it.url, { headers: { "User-Agent": "Mozilla/5.0" }, signal: ctx.signal }, Math.min(timeoutMs, ctx.timeoutMs));
-    if (!r.ok) {
-      const bodyText = await r.text().catch(() => "");
-      throw new HttpError(`binance_http_${r.status}`, r.status, r.headers, bodyText);
+  let lastErr = null;
+  for (const url of urls) {
+    try {
+      const r = await fetchWithTimeout(url, {
+        headers: { "User-Agent": "Mozilla/5.0" },
+      }, timeoutMs);
+      if (!r.ok) throw new Error(`binance_http_${r.status}`);
+      const data = await r.json();
+      return data.map(k => ({
+        t: k[0],
+        o: Number(k[1]),
+        h: Number(k[2]),
+        l: Number(k[3]),
+        c: Number(k[4]),
+        v: Number(k[5]),
+      }));
+    } catch (e) {
+      lastErr = e;
     }
-    const data = await r.json().catch(() => null);
-    if (!Array.isArray(data)) throw new Error("binance_bad_json");
-    return data.map(k => ({
-      t: k[0],
-      o: Number(k[1]),
-      h: Number(k[2]),
-      l: Number(k[3]),
-      c: Number(k[4]),
-      v: Number(k[5]),
-    }));
-  }, { attempts: Math.min(3, Math.max(1, items.length)), timeoutMs: Math.min(timeoutMs, 9000) });
-
-  return out;
+  }
+  throw lastErr || new Error("binance_http_failed");
 }
 
-
 async function fetchTwelveDataCandles(symbol, timeframe, limit, timeoutMs, env) {
-  const items = loadKeyItems(env, "twelvedata");
-  if (!items.length) throw new Error("twelvedata_key_missing");
+  const tdPool = parseApiKeyPool(env.TWELVEDATA_API_KEY, env.TWELVEDATA_API_KEYS);
+  if (!tdPool.length) throw new Error("twelvedata_key_missing");
   const kind = assetKind(symbol);
   if (kind === "unknown") throw new Error("twelvedata_unknown_symbol");
 
   const interval = mapTimeframeToTwelve(timeframe);
   const sym = mapForexSymbolForTwelve(symbol);
-
+  const tdKey = pickApiKey(tdPool, `${symbol}|${timeframe}|${Math.floor(Date.now() / 60000)}`);
+  const base = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(sym)}&interval=${encodeURIComponent(interval)}&outputsize=${limit}&apikey=${encodeURIComponent(tdKey)}`;
   const sources = [];
   if (kind === "crypto") sources.push("binance");
   if (kind === "forex" || kind === "metal") sources.push("fx");
+  const urls = [base, ...sources.map((s) => `${base}&source=${encodeURIComponent(s)}`)];
 
-  const out = await withRotation("twelvedata", env, items, async (it, ctx) => {
-    const base =
-      `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(sym)}` +
-      `&interval=${encodeURIComponent(interval)}` +
-      `&outputsize=${encodeURIComponent(limit)}` +
-      `&apikey=${encodeURIComponent(it.key)}`;
-
-    const urls = [base, ...sources.map((s) => `${base}&source=${encodeURIComponent(s)}`)];
-
-    let lastErr = null;
-    for (const url of urls) {
-      try {
-        const r = await fetchWithTimeout(url, {}, Math.min(timeoutMs, ctx.timeoutMs));
-        const bodyText = !r.ok ? await r.text().catch(() => "") : "";
-        if (!r.ok) throw new HttpError(`twelvedata_http_${r.status}`, r.status, r.headers, bodyText);
-
-        const j = await r.json().catch(() => null);
-        if (!j) throw new Error("twelvedata_bad_json");
-        // TwelveData sometimes signals errors with 200 OK
-        if (String(j.status || "").toLowerCase() === "error") {
-          const code = Number(j.code || 0) || 0;
-          const msg = String(j.message || "");
-          if (code === 401 || code === 403) throw new HttpError("twelvedata_auth", code || 401, r.headers, msg);
-          if (code === 429 || /limit|too many/i.test(msg)) throw new HttpError("twelvedata_rate", 429, r.headers, msg);
-          throw new Error(`twelvedata_err_${code || "unknown"}`);
-        }
-
-        const values = Array.isArray(j.values) ? j.values : [];
-        return values.reverse().map(v => ({
-          t: Date.parse(v.datetime + "Z") || Date.now(),
-          o: Number(v.open),
-          h: Number(v.high),
-          l: Number(v.low),
-          c: Number(v.close),
-          v: v.volume ? Number(v.volume) : null,
-        }));
-      } catch (e) {
-        lastErr = e;
-      }
+  let lastErr = null;
+  let j = null;
+  for (const url of urls) {
+    try {
+      const r = await fetchWithTimeout(url, {}, timeoutMs);
+      if (!r.ok) throw new Error(`twelvedata_http_${r.status}`);
+      j = await r.json();
+      if (j.status === "error") throw new Error(`twelvedata_err_${j.code || ""}`);
+      break;
+    } catch (e) {
+      lastErr = e;
+      j = null;
     }
-    throw lastErr || new Error("twelvedata_http_failed");
-  }, { attempts: 3, timeoutMs: Math.min(timeoutMs, 12000) });
+  }
+  if (!j) throw lastErr || new Error("twelvedata_http_failed");
 
-  return out;
+  const values = Array.isArray(j.values) ? j.values : [];
+  return values.reverse().map(v => ({
+    t: Date.parse(v.datetime + "Z") || Date.now(),
+    o: Number(v.open),
+    h: Number(v.high),
+    l: Number(v.low),
+    c: Number(v.close),
+    v: v.volume ? Number(v.volume) : null,
+  }));
 }
 
-
 async function fetchAlphaVantageFxIntraday(symbol, timeframe, limit, timeoutMs, env) {
-  const items = loadKeyItems(env, "alphavantage");
-  if (!items.length) throw new Error("alphavantage_key_missing");
+  const avPool = parseApiKeyPool(env.ALPHAVANTAGE_API_KEY, env.ALPHAVANTAGE_API_KEYS);
+  if (!avPool.length) throw new Error("alphavantage_key_missing");
   if (!/^[A-Z]{6}$/.test(symbol) && symbol !== "XAUUSD" && symbol !== "XAGUSD") throw new Error("alphavantage_only_fx_like");
 
   const from = symbol.slice(0,3);
   const to = symbol.slice(3,6);
   const interval = mapTimeframeToAlphaVantage(timeframe);
 
-  const rows = await withRotation("alphavantage", env, items, async (it, ctx) => {
-    const url =
-      `https://www.alphavantage.co/query?function=FX_INTRADAY` +
-      `&from_symbol=${encodeURIComponent(from)}` +
-      `&to_symbol=${encodeURIComponent(to)}` +
-      `&interval=${encodeURIComponent(interval)}` +
-      `&outputsize=compact` +
-      `&apikey=${encodeURIComponent(it.key)}`;
+  const avKey = pickApiKey(avPool, `${symbol}|${timeframe}|${Math.floor(Date.now() / 60000)}`);
+  const url =
+    `https://www.alphavantage.co/query?function=FX_INTRADAY` +
+    `&from_symbol=${encodeURIComponent(from)}` +
+    `&to_symbol=${encodeURIComponent(to)}` +
+    `&interval=${encodeURIComponent(interval)}` +
+    `&outputsize=compact` +
+    `&apikey=${encodeURIComponent(avKey)}`;
 
-    const r = await fetchWithTimeout(url, {}, Math.min(timeoutMs, ctx.timeoutMs));
-    if (!r.ok) {
-      const bodyText = await r.text().catch(() => "");
-      throw new HttpError(`alphavantage_http_${r.status}`, r.status, r.headers, bodyText);
-    }
-    const j = await r.json().catch(() => null);
-    if (!j) throw new Error("alphavantage_bad_json");
+  const r = await fetchWithTimeout(url, {}, timeoutMs);
+  if (!r.ok) throw new Error(`alphavantage_http_${r.status}`);
+  const j = await r.json();
 
-    // AlphaVantage error signaling
-    if (j["Error Message"] || j["Information"] || j["Note"]) {
-      const msg = String(j["Error Message"] || j["Information"] || j["Note"] || "");
-      if (/limit|frequency|too many/i.test(msg)) throw new HttpError("alphavantage_rate", 429, r.headers, msg);
-      throw new Error("alphavantage_api_error");
-    }
+  const key = Object.keys(j).find(k => k.startsWith("Time Series FX"));
+  if (!key) throw new Error("alphavantage_no_timeseries");
 
-    const key = Object.keys(j).find(k => k.startsWith("Time Series FX"));
-    if (!key) throw new Error("alphavantage_no_timeseries");
-
-    const ts = j[key];
-    return Object.entries(ts)
-      .slice(0, limit)
-      .map(([dt, v]) => ({
-        t: Date.parse(dt + "Z") || Date.now(),
-        o: Number(v["1. open"]),
-        h: Number(v["2. high"]),
-        l: Number(v["3. low"]),
-        c: Number(v["4. close"]),
-        v: null,
-      }))
-      .reverse();
-  }, { attempts: 3, timeoutMs: Math.min(timeoutMs, 12000) });
+  const ts = j[key];
+  const rows = Object.entries(ts)
+    .slice(0, limit)
+    .map(([dt, v]) => ({
+      t: Date.parse(dt + "Z") || Date.now(),
+      o: Number(v["1. open"]),
+      h: Number(v["2. high"]),
+      l: Number(v["3. low"]),
+      c: Number(v["4. close"]),
+      v: null,
+    }))
+    .reverse();
 
   return rows;
 }
-
 
 function mapTimeframeToFinnhubResolution(tf) {
   const m = { M15:"15", H1:"60", H4:"240", D1:"D" };
   return m[tf] || "240";
 }
 async function fetchFinnhubForexCandles(symbol, timeframe, limit, timeoutMs, env) {
-  const items = loadKeyItems(env, "finnhub");
-  if (!items.length) throw new Error("finnhub_key_missing");
+  const fhPool = parseApiKeyPool(env.FINNHUB_API_KEY, env.FINNHUB_API_KEYS);
+  if (!fhPool.length) throw new Error("finnhub_key_missing");
   if (!/^[A-Z]{6}$/.test(symbol)) throw new Error("finnhub_only_forex");
 
   const res = mapTimeframeToFinnhubResolution(timeframe);
@@ -3837,132 +3387,125 @@ async function fetchFinnhubForexCandles(symbol, timeframe, limit, timeoutMs, env
   const lookbackSec = 60 * 60 * 24 * 10;
   const from = now - lookbackSec;
 
-  const candles = await withRotation("finnhub", env, items, async (it, ctx) => {
-    const url = `https://finnhub.io/api/v1/forex/candle?symbol=${encodeURIComponent(inst)}&resolution=${encodeURIComponent(res)}&from=${from}&to=${now}&token=${encodeURIComponent(it.key)}`;
+  const fhKey = pickApiKey(fhPool, `${symbol}|${timeframe}|${Math.floor(Date.now() / 60000)}`);
+  const url = `https://finnhub.io/api/v1/forex/candle?symbol=${encodeURIComponent(inst)}&resolution=${encodeURIComponent(res)}&from=${from}&to=${now}&token=${encodeURIComponent(fhKey)}`;
 
-    const r = await fetchWithTimeout(url, {}, Math.min(timeoutMs, ctx.timeoutMs));
-    if (!r.ok) {
-      const bodyText = await r.text().catch(() => "");
-      throw new HttpError(`finnhub_http_${r.status}`, r.status, r.headers, bodyText);
-    }
-    const j = await r.json().catch(() => null);
-    if (!j) throw new Error("finnhub_bad_json");
-    if (j.s !== "ok") {
-      const msg = String(j.s || "");
-      if (/limit|rate/i.test(msg)) throw new HttpError("finnhub_rate", 429, r.headers, msg);
-      throw new Error(`finnhub_status_${j.s}`);
-    }
+  const r = await fetchWithTimeout(url, {}, timeoutMs);
+  if (!r.ok) throw new Error(`finnhub_http_${r.status}`);
+  const j = await r.json();
+  if (j.s !== "ok") throw new Error(`finnhub_status_${j.s}`);
 
-    const out = j.t.map((t, i) => ({
-      t: t * 1000,
-      o: Number(j.o[i]),
-      h: Number(j.h[i]),
-      l: Number(j.l[i]),
-      c: Number(j.c[i]),
-      v: j.v ? Number(j.v[i]) : null,
-    }));
-    return out.slice(-limit);
-  }, { attempts: 3, timeoutMs: Math.min(timeoutMs, 12000) });
-
-  return candles;
+  const candles = j.t.map((t, i) => ({
+    t: t * 1000,
+    o: Number(j.o[i]),
+    h: Number(j.h[i]),
+    l: Number(j.l[i]),
+    c: Number(j.c[i]),
+    v: j.v ? Number(j.v[i]) : null,
+  }));
+  return candles.slice(-limit);
 }
 
 
-function mapTimeframeToYahoo(tf) {
-  const t = String(tf || "").trim().toLowerCase();
-  const direct = {
-    "1m":"1m","3m":"2m","2m":"2m","5m":"5m","15m":"15m","30m":"30m","45m":"30m",
-    "1h":"60m","60m":"60m","2h":"60m","4h":"60m","6h":"60m","12h":"60m",
-    "1d":"1d","day":"1d","d":"1d",
-    "1w":"1wk","week":"1wk","w":"1wk",
-    "1mo":"1mo","1mth":"1mo","month":"1mo","mo":"1mo"
-  };
-  if (direct[t]) return direct[t];
-  // formats like "15min", "4h", "2d"
-  const m = t.match(/^(\d+)\s*(m|min|minute|minutes|h|hr|hour|hours|d|day|days|w|wk|week|weeks|mo|mon|month|months)$/);
-  if (!m) return null;
-  const n = Number(m[1]||0);
-  const unit = m[2];
-  if (!n) return null;
-  if (unit.startsWith("m")) {
-    if (n <= 2) return "2m";
-    if (n <= 5) return "5m";
-    if (n <= 15) return "15m";
-    if (n <= 30) return "30m";
-    return "60m";
-  }
-  if (unit.startsWith("h")) return "60m"; // Yahoo chart intervals are limited; 1h is widely supported
-  if (unit.startsWith("d")) return "1d";
-  if (unit.startsWith("w")) return "1wk";
-  return "1mo";
+async function fetchCryptoCompareCandles(symbol, timeframe, limit, timeoutMs, env) {
+  const { fsym, tsym } = mapSymbolToCryptoComparePair(symbol);
+  if (!/^[A-Z0-9]{2,10}$/.test(fsym) || !/^[A-Z0-9]{2,10}$/.test(tsym)) throw new Error("cc_bad_symbol");
+
+  const { endpoint, aggregate } = mapTimeframeToCryptoCompare(timeframe);
+  const apiKey = String(env.CRYPTOCOMPARE_API_KEY || "").trim();
+  const qs = new URLSearchParams({
+    fsym,
+    tsym,
+    limit: String(Math.min(2000, Math.max(30, Number(limit || 120)))),
+    aggregate: String(Math.max(1, Number(aggregate || 1))),
+  });
+  const url = `https://min-api.cryptocompare.com/data/v2/${endpoint}?` + qs.toString();
+
+  const headers = { "Accept": "application/json" };
+  if (apiKey) headers["authorization"] = `Apikey ${apiKey}`;
+
+  const r = await fetchWithTimeout(url, { headers }, timeoutMs);
+  if (!r.ok) throw new Error(`cc_http_${r.status}`);
+  const j = await r.json().catch(() => null);
+  const arr = j?.Data?.Data;
+  if (!Array.isArray(arr) || !arr.length) throw new Error("cc_no_data");
+
+  const candles = arr.map((x) => ({
+    t: Number(x.time) * 1000,
+    o: Number(x.open),
+    h: Number(x.high),
+    l: Number(x.low),
+    c: Number(x.close),
+    v: x.volumeto != null ? Number(x.volumeto) : null,
+  })).filter(x => Number.isFinite(x.c));
+
+  return candles.slice(-limit);
 }
 
-function mapTimeframeToYahooFallback(tf) {
-  const t = String(tf || "").trim().toLowerCase();
-  // Safer / more widely supported intervals
-  if (t.includes("m") || t.includes("min") || t.includes("h") || t.includes("hr")) return "15m";
-  if (t.includes("w") || t.includes("wk")) return "1wk";
-  if (t.includes("mo") || t.includes("mon") || t.includes("month")) return "1mo";
-  return "1d";
-}
+async function fetchYahooChartCandles(symbol, timeframe, limit, timeoutMs) {
+  // Yahoo can intermittently return 404 from some edges / for some symbols.
+  // We try multiple hosts + richer headers, and we keep H4 as 60m + downsample.
+  const interval = yahooInterval(timeframe);
+  const ysym = toYahooSymbol(symbol);
 
-async function fetchYahooChartCandles(symbol, timeframe, limit, timeoutMs, env) {
-  const intervalToTry = [
-    mapTimeframeToYahoo(timeframe),
-    mapTimeframeToYahooFallback(timeframe),
-  ].filter(Boolean);
+  // Pick a range that gives enough bars for downsampling + analysis.
+  const baseRange = (timeframe === "D1") ? "6mo" : (timeframe === "H4" ? "30d" : "10d");
 
-  const symbolStr = String(await Promise.resolve(symbol));
+  const tryIntervals = [];
+  if (interval) tryIntervals.push(interval);
+  if (interval !== "60m") tryIntervals.push("60m");
 
-  const baseHosts = [
+  const hosts = [
     "https://query1.finance.yahoo.com",
-    "https://query2.finance.yahoo.com",
-    "https://query1.finance.yahoo.com",
-    "https://query2.finance.yahoo.com",
+    "https://query2.finance.yahoo.com"
   ];
-  const items = loadUrlItems(env || {}, "yahoo", baseHosts.map((h) => `${h}`));
 
-  const nowSec = Math.floor(Date.now() / 1000);
-  const lookbackSec = 60 * 60 * 24 * 10;
-  const fromSec = nowSec - lookbackSec;
+  const qs = `?interval={IV}&range=${encodeURIComponent(baseRange)}&includePrePost=false&events=div%7Csplit%7Cearn&lang=en-US&region=US`;
 
-  for (const interval of intervalToTry) {
-    try {
-      const candles = await withRotation("yahoo", env || {}, items, async (it, ctx) => {
-        const url = `${String(it.url).replace(/\/+$/, "")}/v8/finance/chart/${encodeURIComponent(symbolStr)}?interval=${encodeURIComponent(interval)}&range=10d&includePrePost=false&events=div%7Csplit`;
-        const r = await fetchWithTimeout(url, { headers: { "User-Agent": "Mozilla/5.0" }, signal: ctx.signal }, Math.min(timeoutMs, ctx.timeoutMs));
-        if (!r.ok) {
-          const bodyText = await r.text().catch(() => "");
-          throw new HttpError(`yahoo_http_${r.status}`, r.status, r.headers, bodyText);
-        }
-        const j = await r.json().catch(() => null);
+  const headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+    "Accept": "application/json,text/plain,*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://finance.yahoo.com/",
+    "Origin": "https://finance.yahoo.com"
+  };
+
+  let lastErr = null;
+
+  for (const iv of tryIntervals) {
+    for (const host of hosts) {
+      try {
+        const url = `${host}/v8/finance/chart/${encodeURIComponent(ysym)}` + qs.replace("{IV}", encodeURIComponent(iv));
+        const r = await fetchWithTimeout(url, { headers }, timeoutMs);
+        if (!r.ok) throw new Error(`yahoo_http_${r.status}`);
+        const j = await r.json();
+
         const result = j?.chart?.result?.[0];
-        const err = j?.chart?.error;
-        if (err) throw new Error(`yahoo_err_${err?.code || "unknown"}`);
-
         const ts = result?.timestamp || [];
-        const q = result?.indicators?.quote?.[0] || {};
-        const o = q.open || [], h = q.high || [], l = q.low || [], c = q.close || [], v = q.volume || [];
-        const out = [];
-        for (let i = 0; i < ts.length; i++) {
-          const t = (ts[i] || 0) * 1000;
-          if (!t) continue;
-          const oc = Number(c[i]);
-          if (!Number.isFinite(oc)) continue;
-          out.push({ t, o: Number(o[i]), h: Number(h[i]), l: Number(l[i]), c: oc, v: v[i] != null ? Number(v[i]) : null });
-        }
-        if (!out.length) throw new Error("yahoo_empty");
-        return out.slice(-limit);
-      }, { attempts: Math.min(3, Math.max(1, items.length)), timeoutMs: Math.min(timeoutMs, 9000) });
+        const q = result?.indicators?.quote?.[0];
+        if (!ts.length || !q) throw new Error("yahoo_no_data");
 
-      if (Array.isArray(candles) && candles.length) return candles;
-    } catch (e) {
-      // try next interval
+        let candles = ts.map((t, i) => ({
+          t: t * 1000,
+          o: Number(q.open?.[i]),
+          h: Number(q.high?.[i]),
+          l: Number(q.low?.[i]),
+          c: Number(q.close?.[i]),
+          v: q.volume?.[i] != null ? Number(q.volume[i]) : null
+        })).filter(x => Number.isFinite(x.c));
+
+        if (timeframe === "H4" && iv === "60m") {
+          candles = downsampleCandles(candles, 4);
+        }
+
+        return candles.slice(-limit);
+      } catch (e) {
+        lastErr = e;
+      }
     }
   }
-  throw new Error("yahoo_all_failed");
+  throw lastErr || new Error("yahoo_no_data");
 }
-
 
 function marketCacheKey(symbol, timeframe) {
   return `market:${String(symbol).toUpperCase()}:${String(timeframe).toUpperCase()}`;
@@ -4006,11 +3549,12 @@ async function getMarketCandlesWithFallback(env, symbol, timeframe) {
     if (providerInCooldown(p)) continue;
     try {
       let candles = null;
-      if (p === "binance") candles = await fetchBinanceCandles(symbol, tf, limit, timeoutMs, env);
+      if (p === "binance") candles = await fetchBinanceCandles(symbol, tf, limit, timeoutMs);
+      if (p === "cryptocompare") candles = await fetchCryptoCompareCandles(symbol, tf, limit, timeoutMs, env);
       if (p === "twelvedata") candles = await fetchTwelveDataCandles(symbol, tf, limit, timeoutMs, env);
       if (p === "alphavantage") candles = await fetchAlphaVantageFxIntraday(symbol, tf, limit, timeoutMs, env);
       if (p === "finnhub") candles = await fetchFinnhubForexCandles(symbol, tf, limit, timeoutMs, env);
-      if (p === "yahoo") candles = await fetchYahooChartCandles(symbol, tf, limit, timeoutMs, env);
+      if (p === "yahoo") candles = await fetchYahooChartCandles(symbol, tf, limit, timeoutMs);
       if (Array.isArray(candles) && candles.length) {
         await setMarketCache(env, cacheKey, candles);
         markProviderSuccess(p, "market");
@@ -4082,11 +3626,12 @@ async function getMarketCandlesWithFallbackRaw(env, symbol, timeframe, timeoutMs
     if (providerInCooldown(p)) continue;
     try {
       let candles = null;
-      if (p === "binance") candles = await fetchBinanceCandles(symbol, timeframe, limit, timeoutMs, env);
+      if (p === "binance") candles = await fetchBinanceCandles(symbol, timeframe, limit, timeoutMs);
+      if (p === "cryptocompare") candles = await fetchCryptoCompareCandles(symbol, timeframe, limit, timeoutMs, env);
       if (p === "twelvedata") candles = await fetchTwelveDataCandles(symbol, timeframe, limit, timeoutMs, env);
       if (p === "alphavantage") candles = await fetchAlphaVantageFxIntraday(symbol, timeframe, limit, timeoutMs, env);
       if (p === "finnhub") candles = await fetchFinnhubForexCandles(symbol, timeframe, limit, timeoutMs, env);
-      if (p === "yahoo") candles = await fetchYahooChartCandles(symbol, timeframe, limit, timeoutMs, env);
+      if (p === "yahoo") candles = await fetchYahooChartCandles(symbol, timeframe, limit, timeoutMs);
       if (Array.isArray(candles) && candles.length) {
         await setMarketCache(env, cacheKey, candles);
         markProviderSuccess(p, "market");
@@ -4113,32 +3658,35 @@ function apiRespCacheSet(key, val, ttlMs) {
   API_RESP_CACHE.set(key, { val, exp: Date.now() + Math.max(500, Number(ttlMs || 10000)) });
 }
 
-async function fetchSymbolNewsFa(symbol, limit, env) {
-  const q = encodeURIComponent(symbolNewsQueryFa(symbol));
-  const fallbackUrls = [
-    `https://news.google.com/rss/search?q=${q}&hl=fa&gl=IR&ceid=IR:fa`,
-    `https://news.google.com/rss/search?q=${q}&hl=fa&gl=AE&ceid=AE:fa`,
-    `https://www.bing.com/news/search?q=${q}&format=rss`,
+async function fetchSymbolNewsFa(symbol, env) {
+  const query = symbolNewsQueryFa(symbol);
+  const timeoutMs = Number(env.NEWS_TIMEOUT_MS || 9000);
+  const limit = Math.min(8, Math.max(3, Number(env.NEWS_ITEMS_LIMIT || 6)));
+
+  const urlsBase = [
+    "https://news.google.com/rss/search?q=" + encodeURIComponent(query) + "&hl=fa&gl=IR&ceid=IR:fa",
+    "https://news.google.com/rss/search?q=" + encodeURIComponent(symbol + " market") + "&hl=fa&gl=IR&ceid=IR:fa",
+    "https://www.bing.com/news/search?q=" + encodeURIComponent(query) + "&format=rss&setlang=fa",
   ];
+  const ext = String(env.NEWS_FEEDS_EXTRA || "").split(",").map((x) => x.trim()).filter(Boolean);
+  const urls = urlsBase.concat(ext);
+  const shift = urls.length ? (Math.floor(Date.now() / 60000) + String(symbol || "").length) % urls.length : 0;
+  const rolledUrls = urls.slice(shift).concat(urls.slice(0, shift));
 
-  const items = loadUrlItems(env || {}, "news", fallbackUrls);
-  const timeoutMs = Number(env.NEWS_TIMEOUT_MS || 7000);
-
-  const out = await withRotation("news", env || {}, items, async (it, ctx) => {
-    const r = await fetchWithTimeout(String(it.url), { headers: { "User-Agent": "Mozilla/5.0" }, signal: ctx.signal }, Math.min(timeoutMs, ctx.timeoutMs));
-    if (!r.ok) {
-      const bodyText = await r.text().catch(() => "");
-      throw new HttpError(`news_http_${r.status}`, r.status, r.headers, bodyText);
+  let lastErr = null;
+  for (const u of rolledUrls) {
+    try {
+      const r = await fetchWithTimeout(u, { headers: { "User-Agent": "Mozilla/5.0" } }, timeoutMs);
+      if (!r.ok) throw new Error("news_http_" + r.status);
+      const xml = await r.text();
+      const items = parseRssItems(xml, limit);
+      if (items.length) return items;
+    } catch (e) {
+      lastErr = e;
     }
-    const xml = await r.text();
-    const parsed = parseRssItems(xml, limit);
-    if (!parsed.length) throw new Error("news_empty");
-    return parsed;
-  }, { attempts: Math.min(3, Math.max(1, items.length)), timeoutMs });
-
-  return out;
+  }
+  throw lastErr || new Error("news_failed");
 }
-
 
 function symbolNewsQueryFa(symbol) {
   const map = {
@@ -4172,10 +3720,8 @@ function parseRssItems(xml, limit) {
     const link = decodeXmlEntities(((b.match(/<link>([\s\S]*?)<\/link>/i) || [])[1] || "").trim());
     const source = decodeXmlEntities(stripTags((b.match(/<source[^>]*>([\s\S]*?)<\/source>/i) || [])[1] || "")).trim();
     const pubDate = decodeXmlEntities(stripTags((b.match(/<pubDate>([\s\S]*?)<\/pubDate>/i) || [])[1] || "")).trim();
-    const descRaw = (b.match(/<description>([\s\S]*?)<\/description>/i) || [])[1] || (b.match(/<content:encoded>([\s\S]*?)<\/content:encoded>/i) || [])[1] || "";
-    const summary = decodeXmlEntities(stripTags(descRaw)).trim().slice(0, 320);
     if (!title || !link) continue;
-    out.push({ title: title.slice(0, 180), url: link, source: source || "Google News", publishedAt: pubDate || "", summary });
+    out.push({ title: title.slice(0, 180), url: link, source: source || "Google News", publishedAt: pubDate || "" });
     if (out.length >= limit) break;
   }
   return out;
@@ -4183,7 +3729,7 @@ function parseRssItems(xml, limit) {
 
 async function buildNewsBlockForSymbol(symbol, env, maxItems = 4) {
   try {
-    const rows = await fetchSymbolNewsFa(symbol, 5, env);
+    const rows = await fetchSymbolNewsFa(symbol, env);
     if (!Array.isArray(rows) || !rows.length) return "";
     return rows.slice(0, maxItems).map((x, i) => {
       const src = x?.source ? (" | " + x.source) : "";
@@ -4224,85 +3770,6 @@ async function buildNewsAnalysisSummary(symbol, articles, env) {
   }
 }
 
-async function sha256Hex(str) {
-  const data = new TextEncoder().encode(String(str || ""));
-  const buf = await crypto.subtle.digest("SHA-256", data);
-  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-function articleIdentityString(symbol, article) {
-  const u = String(article?.url || "").trim();
-  const t = String(article?.title || "").trim();
-  const s = String(symbol || "").trim();
-  return [s, u, t].filter(Boolean).join("|");
-}
-
-async function getOrBuildNewsArticleAnalysis(symbol, article, env) {
-  const id = (await sha256Hex(articleIdentityString(symbol, article))).slice(0, 16);
-  const memKey = `news_one|${symbol}|${id}`;
-  const mem = apiRespCacheGet(memKey);
-  if (mem) return { id, ...mem };
-
-  const kvKey = `news:one:${symbol}:${id}`;
-  if (env?.BOT_KV) {
-    const cached = await env.BOT_KV.get(kvKey).catch(() => null);
-    if (cached) {
-      try {
-        const j = JSON.parse(cached);
-        if (j && typeof j.analysis === "string") {
-          apiRespCacheSet(memKey, j, Number(env.NEWS_ONE_RESPONSE_CACHE_MS || 45000));
-          return { id, ...j };
-        }
-      } catch {}
-    }
-  }
-
-  const analysis = await buildNewsArticleAnalysis(symbol, article, env);
-  const payload = { analysis, generatedAt: new Date().toISOString() };
-
-  apiRespCacheSet(memKey, payload, Number(env.NEWS_ONE_RESPONSE_CACHE_MS || 45000));
-  if (env?.BOT_KV) {
-    const ttl = Math.max(60, Math.min(7 * 24 * 3600, Number(env.NEWS_ARTICLE_ANALYSIS_TTL_SEC || 6 * 3600) || 6 * 3600));
-    await env.BOT_KV.put(kvKey, JSON.stringify(payload), { expirationTtl: ttl }).catch(() => {});
-  }
-  return { id, ...payload };
-}
-
-async function buildNewsArticleAnalysis(symbol, article, env) {
-  const title = String(article?.title || "").trim();
-  const summary = String(article?.summary || "").trim();
-  const source = String(article?.source || "").trim();
-  const publishedAt = String(article?.publishedAt || "").trim();
-  const url = String(article?.url || "").trim();
-
-  const prompt = [
-    "تو یک تحلیل‌گر خبر بازار مالی هستی.",
-    "قاعده: فقط بر اساس داده‌های زیر تحلیل کن و اگر اطلاعات کافی نیست صریح بگو.",
-    `نماد: ${symbol}`,
-    `منبع: ${source || "-"}`,
-    `زمان انتشار: ${publishedAt || "-"}`,
-    `تیتر: ${title || "-"}`,
-    summary ? ("خلاصه/توضیح RSS: " + summary) : "خلاصه/توضیح RSS: (ندارد)",
-    url ? ("لینک: " + url) : "",
-    "",
-    "خروجی را به فارسی و خیلی کاربردی در ۵ بخش کوتاه بنویس:",
-    "1) اهمیت خبر (Low/Med/High) + دلیل",
-    "2) جهت‌گیری احتمالی کوتاه‌مدت (صعودی/نزولی/خنثی) با درجه اطمینان",
-    "3) ریسک‌ها و عدم‌قطعیت‌ها",
-    "4) چه چیزهایی را باید پیگیری کرد (نقطه‌های داده/خبرهای بعدی)",
-    "5) نکته عملی برای تریدر (بدون سیگنال قطعی)",
-  ].join(String.fromCharCode(10));
-
-  try {
-    const out = await runTextProviders(prompt, env, env.TEXT_PROVIDER_ORDER);
-    return String(out || "").trim() || "تحلیل تولید نشد.";
-  } catch {
-    return "تحلیل موقت: تیتر می‌تواند روی نوسان کوتاه‌مدت اثر بگذارد؛ تا تایید تکنیکال/حجمی صبر کنید و مدیریت ریسک را رعایت کنید.";
-  }
-}
-
-
-
 function timeframeMinutes(tf) {
   const map = { M1: 1, M5: 5, M15: 15, M30: 30, H1: 60, H4: 240, D1: 1440, W1: 10080 };
   return map[String(tf || "").toUpperCase()] || 0;
@@ -4342,9 +3809,9 @@ function computeSnapshot(candles) {
     return s / p;
   };
 
-  const sma20 = sma(closes, 20);
-  const sma50 = sma(closes, 50);
-  const trend = (sma20 && sma50) ? (sma20 > sma50 ? "صعودی" : "نزولی") : "نامشخص";
+  const sma20 = null;
+  const sma50 = null;
+  let trend = "نامشخص";
 
   const n = Math.min(50, candles.length);
   const recent = candles.slice(-n);
@@ -4353,6 +3820,12 @@ function computeSnapshot(candles) {
 
   const lastClose = last.c;
   const changePct = prev?.c ? ((lastClose - prev.c) / prev.c) * 100 : 0;
+
+  const lb = Math.min(20, closes.length - 1);
+  const past = lb > 0 ? closes[closes.length - 1 - lb] : null;
+  if (past != null) {
+    trend = lastClose > past ? "صعودی" : (lastClose < past ? "نزولی" : "نامشخص");
+  }
 
   return {
     lastPrice: lastClose,
@@ -4408,9 +3881,10 @@ function buildLocalFallbackAnalysis(symbol, st, candles, reason = "") {
 /* ========================== TEXT BUILDERS ========================== */
 async function buildTextPromptForSymbol(symbol, userPrompt, st, marketBlock, env, newsBlock = "") {
   const tf = st.timeframe || "H4";
-  const baseRaw = await getAnalysisPrompt(env);
   const sp = await getStylePrompt(env, st.style);
-  const newsAnalysisBlock = newsBlock ? await buildNewsAnalysisSummary(symbol, parseNewsBlockRows(newsBlock), env) : "";
+  const needBase = String(st.promptMode || "").trim() !== "style_only";
+  const baseRaw = needBase ? await getAnalysisPrompt(env) : "";
+  const newsAnalysisBlock = (newsBlock && String(st.promptMode||'').trim() !== 'style_only') ? await buildNewsAnalysisSummary(symbol, parseNewsBlockRows(newsBlock), env) : "";
   const base = baseRaw
      .split("{TIMEFRAME}").join(tf)
      .split("{STYLE}").join(st.style || "")
@@ -4421,68 +3895,31 @@ async function buildTextPromptForSymbol(symbol, userPrompt, st, marketBlock, env
     ? "disabled"
     : (st.profile?.capital ? (st.profile.capital + " " + (st.profile.capitalCurrency || "USDT")) : (st.capital?.amount || "unknown"));
 
-  const userExtra = (isStaff({ username: st.profile?.username }, env) && userPrompt?.trim())
-    ? userPrompt.trim()
-    : "تحلیل را دقیق، مشروط و اجرایی بنویس.";
+  // ✅ Style-only mode: فقط «پرامپتِ سبک انتخابی» اجرا شود (بدون پرامپت پیش‌فرض/دیفالت)
+  if (String(st.promptMode || "").trim() === "style_only") {
+    const capObj = {
+      amount: Number(st.profile?.capital || st.capital?.amount || 0) || 0,
+      currency: String(st.profile?.capitalCurrency || "USDT"),
+      enabled: st.capital?.enabled !== false,
+    };
 
-  return (
-    `${base}
+    const payload = {
+      symbol: String(symbol || "").toUpperCase(),
+      timeframe: tf,
+      style: st.style || "",
+      risk: st.risk || "متوسط",
+      capital: capObj,
+      marketData: marketBlock || "",
+      news: newsBlock || "",
+      userPrompt: String(userPrompt || "").trim(),
+    };
 
-` +
-    `STYLE_PROMPT_JSON:
-${sp}
+    // خروجی: فقط پرامپت سبک + داده‌ها (بدون تگ/متن اضافه)
+    return `${sp}
 
-` +
-    `CONTEXT:
-Symbol=${symbol}
-Timeframe=${tf}
-Risk=${st.risk || "متوسط"}
-Capital=${capital}
-
-` +
-    `MARKET_DATA:
-${marketBlock}
-
-` +
-    (newsBlock ? `NEWS_HEADLINES_FA:
-${newsBlock}
-
-` : ``) +
-    (newsAnalysisBlock ? `NEWS_ANALYSIS_FA:
-${newsAnalysisBlock}
-
-` : ``) +
-    `RULES:
-` +
-    `- فقط و فقط بر اساس سبک انتخابی (${st.style || "پرایس اکشن"}) تحلیل کن.
-` +
-    `- خروجی نهایی حتماً فارسی باشد.
-` +
-    `- مدیریت سرمایه و ریسک را براساس Capital و Risk اعمال کن.
-` +
-    `- از داده OHLC استفاده کن و خیال‌بافی نکن.
-` +
-    `- quickchart_config را به شکل JSON داخلی بساز اما به کاربر نمایش نده.
-
-` +
-    `EXTRA:
-${userExtra}`
-  );
-}
-
-async function buildVisionPrompt(st, env) {
-  const tf = st.timeframe || "H4";
-  const baseRaw = await getAnalysisPrompt(env);
-  const sp = await getStylePrompt(env, st.style);
-  const base = baseRaw
-     .split("{TIMEFRAME}").join(tf)
-     .split("{STYLE}").join(st.style || "")
-     .split("{RISK}").join(st.risk || "")
-     .split("{NEWS}").join(st.newsEnabled ? "on" : "off");
-  const capital = st.capital?.enabled === false
-    ? "disabled"
-    : (st.profile?.capital ? (st.profile.capital + " " + (st.profile.capitalCurrency || "USDT")) : (st.capital?.amount || "unknown"));
-  return (
+${JSON.stringify(payload, null, 2)}`;
+  }
+return (
     `${base}
 
 ` +
@@ -4618,15 +4055,7 @@ function futureISO(days) {
 /* ========================== UPDATE HANDLER ========================== */
 async function handleUpdate(update, env) {
   try {
-    // Handle inline button callbacks (e.g., per-article news analysis)
-    const cb = update.callback_query;
-    if (cb && cb.id) {
-      await handleCallbackQuery(cb, env);
-      return;
-    }
-
-    const msg = update.message || update.edited_message;
-    if (!msg) return;
+    const msg = update.message;
     if (!msg) return;
 
     const chatId = msg.chat?.id;
@@ -4659,17 +4088,6 @@ async function handleUpdate(update, env) {
       await onStart(env, chatId, from, st, refArg);
       return;
     }
-
-    if (text.startsWith("/symbol") || text.startsWith("/set")) {
-      const parts = text.split(" ").slice(1).join(" ").trim();
-      const sym = String(parts || "").toUpperCase().replace(/\s+/g, "");
-      if (!sym) return tgSendMessage(env, chatId, "فرمت: /symbol <SYMBOL>  مثلا: /symbol BTCUSDT", mainMenuKeyboard(env));
-      if (!isSymbol(sym)) return tgSendMessage(env, chatId, "❌ نماد نامعتبر است. از منوی سیگنال‌ها نمادهای موجود را ببین.", mainMenuKeyboard(env));
-      st.selectedSymbol = sym;
-      await saveUser(userId, st, env);
-      return tgSendMessage(env, chatId, `✅ نماد انتخاب شد: ${sym}\nحالا می‌تونی /quote و /news را بزنی.`, mainMenuKeyboard(env));
-    }
-
 
     if (text.startsWith("/setwallet")) {
       if (!isAdmin(from, env)) return tgSendMessage(env, chatId, "⛔️ فقط ادمین می‌تواند آدرس ولت را تنظیم کند.", mainMenuKeyboard(env));
@@ -4740,7 +4158,7 @@ async function handleUpdate(update, env) {
       const txHistory = txs.length
         ? txs.map((t, i) => `${i + 1}) ${t.txHash || "-"} | ${t.amount || "-"} USDT | ${String(t.createdAt || "").slice(0, 16).replace("T", " ")}`).join(String.fromCharCode(10))
         : "—";
-      const planName = `${st.profile?.username || "marketi1"}  PRO`;
+      const planName = `${st.profile?.username || "marketiq"}  PRO`;
       const txt =
         `💳 ولت
 
@@ -4757,8 +4175,8 @@ ${txHistory}
 ${wallet}
 
 ` : "") +
-        `«واریزی فقط به آدرس ولت درگاه ممکن است
-در لیست زیر باید از واریز هش واریزی را ارسال کنید.»`;
+        `«واریزی فقط به آدرس  این ولت  ممکن است
+در  زیر باید بعد از واریز هش واریزی را ارسال کنید.»`;
       return tgSendMessage(env, chatId, txt, walletMenuKeyboard());
     }
 
@@ -4784,9 +4202,9 @@ Memo/Tag: ${memo}
 
 ` +
         `«واریزی فقط به آدرس ولت درگاه ممکن است
-در لیست زیر باید از واریز هش واریزی را ارسال کنید.»
+در  زیر باید از واریز هش واریزی را ارسال کنید.»
 
-TxID پرداخت را همینجا بفرست (در صورت نیاز: <txid> <amount>).`;
+hash پرداخت را همینجا بفرست (در صورت نیاز: <hash> <amount>).`;
       return tgSendMessage(env, chatId, txt, kb([[BTN.BACK, BTN.HOME]]));
     }
 
@@ -4846,37 +4264,56 @@ TxID پرداخت را همینجا بفرست (در صورت نیاز: <txid> <
 
 برای سوالات آماده یا ارسال تیکت از دکمه‌ها استفاده کن.
 
-پیام مستقیم: ${handle}${walletLine}`,
+پیام مستقیم: ${handle}}`,
         kb([[BTN.SUPPORT_FAQ, BTN.SUPPORT_TICKET], [BTN.SUPPORT_CUSTOM_PROMPT], [BTN.HOME]])
       );
     }
 
 
-    if (text === "/quote" || text === BTN.QUOTE || text.startsWith("/quote ")) {
-      const arg = text.startsWith("/quote ") ? text.split(" ").slice(1).join(" ").trim() : "";
-      const symbol = String(arg || "").toUpperCase();
-      if (symbol) return sendQuoteSnapshotMessage(env, chatId, userId, from, st, symbol);
+    if (text === "/quote" || text === BTN.QUOTE) {
+      const symbol = String(st.selectedSymbol || "BTCUSDT").toUpperCase();
+      const tf = String(st.timeframe || "H4").toUpperCase();
+      try {
+        const candles = await getMarketCandlesWithFallback(env, symbol, tf);
+        const snap = computeSnapshot(candles || []);
+        if (!snap) throw new Error("quote_unavailable");
+        const msgQ = `💹 قیمت لحظه‌ای
 
-      st.state = "choose_symbol_for_quote";
-      await saveUser(userId, st, env);
-      return tgSendMessage(env, chatId, "💹 برای قیمت لحظه‌ای، نماد را انتخاب کن:", symbolPickerKeyboard());
+نماد: ${symbol}
+TF: ${tf}
+قیمت: ${snap.lastPrice}
+تغییر: ${snap.changePct}%
+روند: ${snap.trend || "نامشخص"}`;
+        return tgSendMessage(env, chatId, msgQ, mainMenuKeyboard(env));
+      } catch (e) {
+        return tgSendMessage(env, chatId, "⚠️ قیمت لحظه‌ای در دسترس نیست. کمی بعد دوباره تلاش کن.", mainMenuKeyboard(env));
+      }
     }
 
-    if (text === "/news" || text === BTN.NEWS || text.startsWith("/news ")) {
-      const args = text.startsWith("/news ") ? text.split(" ").slice(1).filter(Boolean) : [];
-      const argSym = String(args[0] || "").trim().toUpperCase().replace(/\s+/g, "");
-      const argLimit = Number(args[1] || "");
-      if (argSym) return sendNewsListMessage(env, chatId, userId, st, argSym, argLimit);
+    if (text === "/news" || text === BTN.NEWS) {
+      const symbol = String(st.selectedSymbol || "BTCUSDT").toUpperCase();
+      try {
+        const rows = await fetchSymbolNewsFa(symbol, env);
+        const lines = (rows || []).slice(0, 5).map((x, i) => `${i + 1}) ${x.title || "-"}`).join("\n");
+        return tgSendMessage(env, chatId, `📰 اخبار ${symbol}
 
-      st.state = "choose_symbol_for_news";
-      await saveUser(userId, st, env);
-      return tgSendMessage(env, chatId, "📰 برای دیدن خبر، نماد را انتخاب کن:", symbolPickerKeyboard());
+${lines || "خبری پیدا نشد."}`, mainMenuKeyboard(env));
+      } catch (e) {
+        return tgSendMessage(env, chatId, "⚠️ خبر مرتبط در دسترس نیست.", mainMenuKeyboard(env));
+      }
     }
 
     if (text === "/newsanalyze" || text === BTN.NEWS_ANALYSIS) {
-      st.state = "choose_symbol_for_news";
-      await saveUser(userId, st, env);
-      return tgSendMessage(env, chatId, "🧠 برای تحلیل خبر، نماد را انتخاب کن:", symbolPickerKeyboard());
+      const symbol = String(st.selectedSymbol || "BTCUSDT").toUpperCase();
+      try {
+        const rows = await fetchSymbolNewsFa(symbol, env);
+        const summary = await buildNewsAnalysisSummary(symbol, rows || [], env);
+        return tgSendMessage(env, chatId, `🧠 تحلیل خبر ${symbol}
+
+${summary || "تحلیل خبری در دسترس نیست."}`, mainMenuKeyboard(env));
+      } catch (e) {
+        return tgSendMessage(env, chatId, "⚠️ تحلیل خبر در دسترس نیست.", mainMenuKeyboard(env));
+      }
     }
 
     if (text === "/miniapp" || text === BTN.MINIAPP) {
@@ -4893,7 +4330,7 @@ TxID پرداخت را همینجا بفرست (در صورت نیاز: <txid> <
 
 از دکمه زیر وارد شوید. اگر دکمه باز نشد، این لینک را مستقیم باز کنید:
 ${finalUrl}\n\nچک‌لیست سریع اتصال:
-${MINIAPP_EXEC_CHECKLIST}`, kbInline);
+${MINIAPP_EXEC_CHECKLIST_TEXT}`, kbInline);
     }
 
 
@@ -5212,14 +4649,6 @@ ${textClean}`);
     }
 
 
-    if (st.state === "choose_symbol_for_quote") {
-      return sendQuoteSnapshotMessage(env, chatId, userId, from, st, text);
-    }
-
-    if (st.state === "choose_symbol_for_news") {
-      return sendNewsListMessage(env, chatId, userId, st, text, 6);
-    }
-
     if (isSymbol(text)) {
       if (!st.profile?.name || !st.profile?.phone) {
         await tgSendMessage(env, chatId, "برای شروع تحلیل، ابتدا پروفایل را کامل کن ✅", mainMenuKeyboard(env));
@@ -5262,7 +4691,7 @@ ${textClean}`);
       const txid = String(parts[0] || "").trim();
       const amount = Number(parts[1] || 0);
       if (!txid || txid.length < 8) {
-        return tgSendMessage(env, chatId, "TxID نامعتبر است. دوباره ارسال کن.", kb([[BTN.BACK, BTN.HOME]]));
+        return tgSendMessage(env, chatId, "hash نامعتبر است. دوباره ارسال کن.", kb([[BTN.BACK, BTN.HOME]]));
       }
       const payment = { id: `dep_${Date.now()}_${st.userId}`, userId: String(st.userId), username: st.profile?.username || "", amount: Number.isFinite(amount) ? amount : 0, txHash: txid, status: "pending", createdAt: new Date().toISOString(), source: "bot_txid" };
       await storePayment(env, payment);
@@ -5341,8 +4770,7 @@ async function onStart(env, chatId, from, st, refArg) {
 
   await tgSendMessage(env, chatId, await getBotWelcomeText(env), mainMenuKeyboard(env));
 
-  const mkb = await miniappInlineKeyboard(env, st, from);
-  if (mkb) await tgSendMessage(env, chatId, "🧩 ورود سریع به مینی‌اپ:", mkb);
+  
 
   if (!st.profile?.name || !st.profile?.phone) {
     await startOnboarding(env, chatId, from, st);
@@ -5471,10 +4899,8 @@ async function sendSettingsSummary(env, chatId, st, from) {
     `🧩 پرامپت اختصاصی: ${st.customPromptId || "پیش‌فرض"}\n` +
     `⚠️ ریسک: ${st.risk}\n` +
     `📰 خبر: ${st.newsEnabled ? "روشن ✅" : "خاموش ❌"}\n\n` +
-    `سهمیه امروز: ${quota}\n` +
-    (wallet ? `\n💳 آدرس ولت:\n${wallet}\n` : "") +
-    (isStaff(from, env) ? `\n(ادمین/اونر) برای تغییر پرامپت: /setprompt ...\n` : "");
-  return tgSendMessage(env, chatId, txt, settingsMenuKeyboard());
+    `سهمیه امروز: ${quota}\n` 
+     return tgSendMessage(env, chatId, txt, settingsMenuKeyboard());
 }
 
 function profileText(st, from, env) {
@@ -5495,7 +4921,7 @@ function inviteShareText(st, env) {
   const botUser = env.BOT_USERNAME ? String(env.BOT_USERNAME).replace(/^@/, "") : "";
   const code = (st.referral?.codes || [])[0] || "";
   const link = code ? (botUser ? `https://t.me/${botUser}?start=ref_${code}` : `ref_${code}`) : "";
-  const share = link ? `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent("با لینک من عضو شو و اشتراک هدیه بگیر ✅")}` : "";
+  const share = link ? `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent("  لینک من عضو شو و اشتراک هدیه بگیر ✅")}` : "";
   return { link, share };
 }
 
@@ -5505,27 +4931,93 @@ function inviteShareText(st, env) {
 QuickChart renders Chart.js configs as images via https://quickchart.io/chart .
 Financial (candlestick/OHLC) charts are supported via chartjs-chart-financial plugin.
 */
-function buildQuickChartSpec(candles, symbol, tf, levels = []) {
-  const items = (candles || []).slice(-60).map((c) => ({
-    x: new Date(c.t || c.time || c.ts || c.timestamp || Date.now()).toISOString(),
+
+function buildQcAnnotations(items, levels = [], qcSpec = null) {
+  const ann = [];
+
+  const addLine = (value, label, color, dash = [6, 4], width = 1.6) => {
+    const v = Number(value);
+    if (!Number.isFinite(v) || v <= 0) return;
+    ann.push({
+      type: "line",
+      scaleID: "y",
+      value: v,
+      borderColor: color,
+      borderWidth: width,
+      borderDash: dash,
+      label: { enabled: true, content: label },
+    });
+  };
+
+  const minX = items?.length ? items[0].x : undefined;
+  const maxX = items?.length ? items[items.length - 1].x : undefined;
+
+  const addZone = (low, high, label, kind) => {
+    const yMin = Number(low);
+    const yMax = Number(high);
+    if (!Number.isFinite(yMin) || !Number.isFinite(yMax) || yMin <= 0 || yMax <= 0) return;
+    const lo = Math.min(yMin, yMax);
+    const hi = Math.max(yMin, yMax);
+    ann.push({
+      type: "box",
+      xMin: minX,
+      xMax: maxX,
+      yMin: lo,
+      yMax: hi,
+      backgroundColor: kind === "supply" ? "rgba(255,77,77,0.10)" : "rgba(47,227,165,0.10)",
+      borderColor: kind === "supply" ? "rgba(255,77,77,0.35)" : "rgba(47,227,165,0.35)",
+      borderWidth: 1,
+      label: { enabled: !!label, content: label || "" },
+    });
+  };
+
+  // fallback "levels" -> treat as generic zones/lines
+  (Array.isArray(levels) ? levels : []).slice(0, 8).forEach((lvl, idx) => {
+    addLine(lvl, `L${idx + 1}`, idx % 2 === 0 ? "#00d1ff" : "#ff8a65");
+  });
+
+  if (qcSpec && typeof qcSpec === "object") {
+    const supports = Array.isArray(qcSpec.supports) ? qcSpec.supports : [];
+    const resistances = Array.isArray(qcSpec.resistances) ? qcSpec.resistances : [];
+    const tp = Array.isArray(qcSpec.tp) ? qcSpec.tp : [];
+    const sl = Number(qcSpec.sl || 0);
+    const zones = Array.isArray(qcSpec.zones) ? qcSpec.zones : [];
+
+    supports.slice(0, 6).forEach((v, i) => addLine(v, `S${i + 1}`, "#00d1ff"));
+    resistances.slice(0, 6).forEach((v, i) => addLine(v, `R${i + 1}`, "#ff8a65"));
+    tp.slice(0, 4).forEach((v, i) => addLine(v, `TP${i + 1}`, "#f7c948", [2, 0], 2));
+    if (Number.isFinite(sl) && sl > 0) addLine(sl, "SL", "#FF4D4D", [2, 0], 2);
+
+    zones.slice(0, 6).forEach((z, i) => addZone(z.low, z.high, z.label || `Z${i + 1}`, (z.kind || "").includes("supply") ? "supply" : "demand"));
+  }
+
+  return ann;
+}
+
+function buildQuickChartSpec(candles, symbol, tf, levels = [], qcSpec = null) {
+  const items = (candles || []).slice(-80).map((c) => ({
+    x: Number(c.t || c.time || c.ts || c.timestamp || Date.now()),
     o: Number(c.o),
     h: Number(c.h),
     l: Number(c.l),
     c: Number(c.c),
-  }));
-  const annotations = (levels || []).slice(0, 6).map((lvl, idx) => ({
-    type: "line",
-    scaleID: "y",
-    value: Number(lvl),
-    borderColor: idx === 0 ? "#00d1ff" : idx === 1 ? "#ff6b6b" : "#f7c948",
-    borderWidth: 1.5,
-    borderDash: [6, 4],
-    label: { enabled: true, content: `L${idx + 1}: ${Number(lvl).toFixed(4)}` },
-  }));
+  })).filter((x) => Number.isFinite(x.x) && Number.isFinite(x.o) && Number.isFinite(x.h) && Number.isFinite(x.l) && Number.isFinite(x.c));
+
+  const annotations = buildQcAnnotations(items, levels, qcSpec);
+
   return {
     type: "candlestick",
-    data: { datasets: [{ label: `${symbol} ${tf}`, data: items }] },
+    data: {
+      datasets: [
+        {
+          label: `${symbol} ${tf}`,
+          data: items,
+          color: { up: "#2FE3A5", down: "#FF4D4D", unchanged: "#888" },
+        },
+      ],
+    },
     options: {
+      parsing: false,
       plugins: {
         legend: { display: false },
         title: { display: true, text: `${symbol} · ${tf}` },
@@ -5536,49 +5028,11 @@ function buildQuickChartSpec(candles, symbol, tf, levels = []) {
   };
 }
 
-function buildQuickChartCandlestickUrl(candles, symbol, tf, levels = [], opts = {}) {
-  const labels = candles.map(c => new Date(c.t).toISOString().slice(0, 16).replace("T", " "));
-  const data = candles.map(c => [c.o, c.h, c.l, c.c]);
-
-  const cfg = {
-    type: "candlestick",
-    data: {
-      labels,
-      datasets: [{ label: symbol, data }],
-    },
-    options: {
-      plugins: {
-        legend: { display: false },
-        title: { display: true, text: `${symbol} (${tf})` },
-      },
-      scales: {
-        x: { ticks: { maxTicksLimit: 8 } },
-      },
-    },
-  };
-
-  if (Array.isArray(levels) && levels.length) {
-    cfg.options.plugins.annotation = {
-      annotations: levels.map((lv, idx) => ({
-        type: "line",
-        yMin: lv.price,
-        yMax: lv.price,
-        borderWidth: 1,
-        borderColor: lv.type === "s" ? "rgba(255,0,0,0.55)" : "rgba(0,200,0,0.55)",
-        label: { display: true, content: lv.label || lv.type || String(idx) },
-      })),
-    };
-  }
-
-  const theme = String(opts.theme || "");
-  const width = Number(opts.width || 800) || 800;
-  const height = Number(opts.height || 420) || 420;
-  const base = String(opts.baseUrl || "https://quickchart.io").replace(/\/+$/, "");
-  const themeStr = theme === "dark" ? "&backgroundColor=transparent&devicePixelRatio=2" : "";
-  const qs = `c=${encodeURIComponent(JSON.stringify(cfg))}&w=${encodeURIComponent(width)}&h=${encodeURIComponent(height)}${themeStr}`;
-  return `${base}/chart?${qs}`;
+function buildQuickChartCandlestickUrl(candles, symbol, tf, levels = [], qcSpec = null) {
+  const cfg = buildQuickChartSpec(candles, symbol, tf, levels, qcSpec);
+  const encoded = encodeURIComponent(JSON.stringify(cfg));
+  return `https://quickchart.io/chart?version=4&format=png&w=900&h=450&devicePixelRatio=2&plugins=chartjs-chart-financial,chartjs-plugin-annotation&c=${encoded}`;
 }
-
 
 
 function buildQuickChartLevelsOnlyUrl(symbol, tf, levels = []) {
@@ -5679,10 +5133,13 @@ async function runSignalTextFlow(env, chatId, from, st, symbol, userPrompt) {
 
   try {
     const flowTimeoutMs = Math.max(15000, Number(env.SIGNAL_FLOW_TIMEOUT_MS || 70000));
-    const result = await Promise.race([
-      runSignalTextFlowReturnText(env, from, st, symbol, userPrompt),
+    
+    const bundle = await Promise.race([
+      runSignalTextFlowReturnBundle(env, from, st, symbol, userPrompt),
       timeoutPromise(flowTimeoutMs, "signal_text_flow_timeout"),
     ]);
+    const result = bundle?.text || "";
+
 
     // 📸 QuickChart candlestick image
     if (String(env.QUICKCHART || "1") !== "0") {
@@ -5702,7 +5159,7 @@ async function runSignalTextFlow(env, chatId, from, st, symbol, userPrompt) {
           // اگر دیتا نداریم، عکس ارسال نکن
           await tgSendMessage(env, chatId, "⚠️ برای این نماد در این تایم‌فریم دیتای کافی پیدا نشد؛ چارت ارسال نشد.", kb([[BTN.HOME]]));
         } else {
-          const levels = extractLevels(result);
+          const levels = (bundle && Array.isArray(bundle.levels) ? bundle.levels : extractLevels(result));
           const chartUrl = buildQuickChartCandlestickUrl(candles, symbol, st.timeframe || "H4", levels);
           const caption = candles.length < 5
             ? `📈 چارت ${symbol} (${st.timeframe || "H4"}) — داده محدود`
@@ -5730,10 +5187,7 @@ async function runSignalTextFlow(env, chatId, from, st, symbol, userPrompt) {
 
     t.stop = true;
     await Promise.race([typingTask, sleep(10)]).catch(() => {});
-
-    for (const part of chunkText(result, 3500)) {
-      await tgSendMessage(env, chatId, part, mainMenuKeyboard(env));
-    }
+    await tgSendLongMessage(env, chatId, result, mainMenuKeyboard(env));
     return true;
   } catch (e) {
     console.error("runSignalTextFlow error:", e);
@@ -5751,13 +5205,17 @@ async function runSignalTextFlow(env, chatId, from, st, symbol, userPrompt) {
   }
 }
 
-function analysisCacheKey(symbol, st) {
+
+function analysisCacheKey(symbol, st, lastTs, userPrompt) {
   const tf = st.timeframe || "H4";
   const style = st.style || "";
   const risk = st.risk || "";
   const news = st.newsEnabled ? "1" : "0";
-  return `analysis:${String(symbol).toUpperCase()}:${tf}:${style}:${risk}:${news}`;
+  const ts = lastTs ? String(lastTs) : "0";
+  const up = userPrompt ? hash32FNV1a(String(userPrompt).trim()) : "0";
+  return `analysis:v2:${String(symbol).toUpperCase()}:${tf}:${style}:${risk}:${news}:${ts}:${up}`;
 }
+
 
 async function getAnalysisCache(env, key) {
   const mem = cacheGet(ANALYSIS_CACHE, key);
@@ -5777,24 +5235,24 @@ function buildMarketBlock(candles, maxRows) {
   const snap = computeSnapshot(candles);
   const ohlc = candlesToCompactCSV(candles, maxRows);
   return (
-    `lastPrice=${snap?.lastPrice}\n` +
-    `changePct=${snap?.changePct}%\n` +
-    `trend=${snap?.trend}\n` +
-    `range50_hi=${snap?.range50?.hi} range50_lo=${snap?.range50?.lo}\n` +
-    `sma20=${snap?.sma20} sma50=${snap?.sma50}\n` +
-    `lastTs=${snap?.lastTs}\n\n` +
-    `OHLC_CSV(t,o,h,l,c):\n${ohlc}`
+    `lastPrice=${snap?.lastPrice}
+` +
+    `changePct=${snap?.changePct}%
+` +
+    `trend=${snap?.trend}
+` +
+    `range50_hi=${snap?.range50?.hi} range50_lo=${snap?.range50?.lo}
+` +
+    `lastTs=${snap?.lastTs}
+
+` +
+    `OHLC_CSV(t,o,h,l,c):
+${ohlc}`
   );
 }
 
-async function runSignalTextFlowReturnText(env, from, st, symbol, userPrompt) {
-  const useCache = !userPrompt && !isStaff(from, env);
-  const cacheKey = useCache ? analysisCacheKey(symbol, st) : "";
-  if (useCache) {
-    const cached = await getAnalysisCache(env, cacheKey);
-    if (cached) return cached;
-  }
 
+async function runSignalTextFlowReturnBundle(env, from, st, symbol, userPrompt) {
   let candles = [];
   try {
     candles = await getMarketCandlesWithFallback(env, symbol, st.timeframe || "H4");
@@ -5802,9 +5260,20 @@ async function runSignalTextFlowReturnText(env, from, st, symbol, userPrompt) {
     console.error("market provider failed (all)", e?.message || e);
     candles = [];
   }
+
+  const lastTs = (Array.isArray(candles) && candles.length) ? (candles[candles.length - 1]?.t || "0") : "0";
+  const cacheKey = analysisCacheKey(symbol, st, lastTs, userPrompt);
+
+  const useCache = !isStaff(from, env);
+  if (useCache) {
+    const cached = await getAnalysisCache(env, cacheKey);
+    if (cached && typeof cached === 'object' && cached.text) return cached;
+  }
+
   const marketBlock = buildMarketBlock(candles, 80);
   const newsBlock = st.newsEnabled ? (await buildNewsBlockForSymbol(symbol, env, 5)) : "";
   const prompt = await buildTextPromptForSymbol(symbol, userPrompt, st, marketBlock, env, newsBlock);
+
   let draft = "";
   try {
     draft = await runTextProviders(prompt, env, st.textOrder);
@@ -5816,19 +5285,44 @@ async function runSignalTextFlowReturnText(env, from, st, symbol, userPrompt) {
       draft = await runTextProviders(compactPrompt, env, st.textOrder);
     } catch (e2) {
       console.error("text providers failed (fallback local):", e2?.message || e2);
-      draft = buildLocalFallbackAnalysis(symbol, st, candles, e2?.message || "text_provider_timeout");
+      const fallback = buildLocalFallbackAnalysis(symbol, st, candles, e2?.message || "text_provider_timeout");
+      const payload = { text: fallback, qcRaw: null, qcSpec: null, levels: [], candlesMeta: { lastTs } };
+      if (useCache && payload.text) await setAnalysisCache(env, cacheKey, payload);
+      return payload;
     }
   }
-  let polished = draft;
-  try {
-    polished = await runPolishProviders(draft, env, st.polishOrder);
-  } catch (e) {
-    console.error("polish flow failed:", e?.message || e);
-    polished = draft;
+
+  // در حالت style_only: هیچ پولیش/بازنویسی اضافه انجام نده تا ساختار استایل حفظ شود
+  let maybePolished = draft;
+  if (String(st.promptMode || "").trim() !== "style_only") {
+    try {
+      maybePolished = await runPolishProviders(draft, env, st.polishOrder);
+    } catch (e) {
+      console.error("polish flow failed:", e?.message || e);
+      maybePolished = draft;
+    }
   }
-  const clean = stripHiddenModelOutput(polished || draft);
-  if (useCache && clean) await setAnalysisCache(env, cacheKey, clean);
-  return clean;
+
+  const raw = stripHiddenModelOutput(maybePolished || draft);
+  const { cleaned, qc: qcRaw } = extractQcJsonAndStrip(raw);
+  const levels = extractLevels(cleaned);
+  const qcSpec = normalizeQcSpec(qcRaw, levels);
+
+  const payload = {
+    text: cleaned,
+    qcRaw,
+    qcSpec,
+    levels,
+    candlesMeta: { lastTs, count: Array.isArray(candles) ? candles.length : 0 },
+  };
+
+  if (useCache && payload.text) await setAnalysisCache(env, cacheKey, payload);
+  return payload;
+}
+
+async function runSignalTextFlowReturnText(env, from, st, symbol, userPrompt) {
+  const bundle = await runSignalTextFlowReturnBundle(env, from, st, symbol, userPrompt);
+  return bundle?.text || "";
 }
 
 
@@ -5890,23 +5384,12 @@ async function handleVisionFlow(env, chatId, from, userId, st, fileId) {
 /* ========================== ZONES RENDER (SVG) ========================== */
 
 
-async function renderQuickChartPng(env, candles, symbol, tf, levels = []) {
-  const items = loadUrlItems(env, "quickchart", ["https://quickchart.io"]);
-  const timeoutMs = Number(env.QUICKCHART_TIMEOUT_MS || 8000);
-
-  const buf = await withRotation("quickchart", env, items, async (it, ctx) => {
-    const chartUrl = buildQuickChartCandlestickUrl(candles, symbol, tf, levels, { baseUrl: it.url, theme: "dark" });
-    const r = await fetchWithTimeout(chartUrl, { cf: { cacheTtl: 60, cacheEverything: true }, signal: ctx.signal }, Math.min(timeoutMs, ctx.timeoutMs));
-    if (!r.ok) {
-      const bodyText = await r.text().catch(() => "");
-      throw new HttpError(`quickchart_http_${r.status}`, r.status, r.headers, bodyText);
-    }
-    return await r.arrayBuffer();
-  }, { attempts: Math.min(3, Math.max(1, items.length)), timeoutMs });
-
-  return buf;
+async function renderQuickChartPng(env, candles, symbol, tf, levels = [], qcSpec = null) {
+  const chartUrl = buildQuickChartCandlestickUrl(candles, symbol, tf, levels, qcSpec);
+  const r = await fetch(chartUrl, { cf: { cacheTtl: 60, cacheEverything: true } });
+  if (!r.ok) throw new Error(`quickchart_fetch_failed_${r.status}`);
+  return await r.arrayBuffer();
 }
-
 
 function buildLevelsOnlySvg(symbol, timeframe, levels = []) {
   const clean = (Array.isArray(levels) ? levels : []).filter((x) => Number.isFinite(Number(x))).map(Number).slice(0, 8);
@@ -5974,6 +5457,53 @@ function extractLevels(text) {
   }
   return dedup.slice(0, 8);
 }
+
+function extractQcJsonAndStrip(text) {
+  const src = String(text || "");
+  const re = /<QCJSON>\s*([\s\S]*?)\s*<\/QCJSON>/i;
+  const m = src.match(re);
+  if (!m) return { cleaned: src.trim(), qc: null };
+
+  const raw = String(m[1] || "").trim();
+  let qc = null;
+  try {
+    qc = JSON.parse(raw);
+  } catch {
+    qc = null;
+  }
+
+  const cleaned = src.replace(re, "").replace(/\n{3,}/g, "\n\n").trim();
+  return { cleaned, qc };
+}
+
+function normalizeQcSpec(qc, levelsFallback = []) {
+  const out = { zones: [], supports: [], resistances: [], tp: [], sl: 0 };
+  if (!qc || typeof qc !== "object") {
+    return { ...out, supports: levelsFallback, resistances: [], tp: [], sl: 0 };
+  }
+  const numArr = (a) => (Array.isArray(a) ? a.map(Number).filter((n) => Number.isFinite(n) && n > 0) : []);
+  out.supports = numArr(qc.supports || qc.support || qc.s);
+  out.resistances = numArr(qc.resistances || qc.resistance || qc.r);
+  out.tp = numArr(qc.tp || qc.targets || qc.takeProfit);
+  out.sl = Number(qc.sl || qc.stopLoss || 0);
+  if (!Number.isFinite(out.sl)) out.sl = 0;
+
+  const zones = Array.isArray(qc.zones) ? qc.zones : [];
+  out.zones = zones.map((z) => ({
+    low: Number(z?.low),
+    high: Number(z?.high),
+    label: String(z?.label || "").slice(0, 24),
+    kind: String(z?.kind || z?.type || "").toLowerCase(),
+  })).filter((z) => Number.isFinite(z.low) && Number.isFinite(z.high) && z.low > 0 && z.high > 0 && z.high !== z.low)
+    .map((z) => ({ ...z, low: Math.min(z.low, z.high), high: Math.max(z.low, z.high) }))
+    .slice(0, 6);
+
+  // fallback: if no supports/resistances provided, use extracted levels
+  const fallback = numArr(levelsFallback);
+  if (!out.supports.length && !out.resistances.length) out.supports = fallback.slice(0, 6);
+  return out;
+}
+
 
 function extractLevelsFromCandles(candles) {
   if (!Array.isArray(candles) || !candles.length) return [];
@@ -6068,85 +5598,6 @@ function escapeHtml(s) {
     .split('"').join("&quot;");
 }
 
-/* ========================== PATH NORMALIZATION + MINIAPP CONFIG INJECTION ========================== */
-function normalizeWorkerPath(pathname) {
-  const p = String(pathname || "");
-  const apiIdx = p.indexOf("/api/");
-  if (apiIdx > 0) return p.slice(apiIdx);
-  const tgIdx = p.indexOf("/telegram/");
-  if (tgIdx > 0) return p.slice(tgIdx);
-  return p || "/";
-}
-
-function guessBasePath(pathname) {
-  const p = String(pathname || "");
-  if (!p || p === "/") return "";
-  const clean = p.replace(/\/+$/, "");
-
-  // Known miniapp entrypoints served by this worker
-  const knownLeafs = ["/miniapp", "/app.js", "/favicon.ico"];
-  for (const leaf of knownLeafs) {
-    if (clean.endsWith(leaf)) {
-      const d = clean.slice(0, -leaf.length) || "";
-      return d === "/" ? "" : d;
-    }
-  }
-
-  // If it looks like a file path, strip filename.
-  if (/\.[a-z0-9]+$/i.test(clean)) {
-    const d = clean.replace(/\/[^\/]+$/, "");
-    return d === "/" ? "" : d;
-  }
-
-  // Otherwise assume it's already the base mount.
-  return clean === "/" ? "" : clean;
-}
-
-function computeApiBase(env, url) {
-  const fromEnv = String(env.PUBLIC_BASE_URL || "").trim();
-  if (fromEnv) return fromEnv.replace(/\/+$/, "");
-  const origin = url?.origin || "";
-  // Best-effort: if you're deploying under a Cloudflare Route prefix (e.g. example.com/bot/*),
-  // make sure you set PUBLIC_BASE_URL=https://example.com/bot for perfect correctness.
-  const basePath = guessBasePath(url?.pathname || "/");
-  return (origin + basePath).replace(/\/+$/, "");
-}
-
-function injectMiniappConfig(html, env, url) {
-  const apiBase = computeApiBase(env, url);
-  const cfg = `<script>window.__API_BASE__=${JSON.stringify(apiBase)};</script>`;
-  // insert right before </head>
-  if (String(html || "").includes("</head>")) return String(html).replace("</head>", cfg + "</head>");
-  return cfg + String(html || "");
-}
-
-/* ========================== MINIAPP TOKEN HELPERS (BASE64URL + HMAC) ========================== */
-function base64UrlEncode(u8) {
-  const b64 = btoa(String.fromCharCode(...new Uint8Array(u8)));
-  return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-}
-function base64UrlDecode(s) {
-  s = String(s || "").replace(/-/g, "+").replace(/_/g, "/");
-  const pad = s.length % 4 ? "=".repeat(4 - (s.length % 4)) : "";
-  const bin = atob(s + pad);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-async function hmacSha256Base64url(keyBytes, msgBytes) {
-  const key = await crypto.subtle.importKey("raw", keyBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const sig = await crypto.subtle.sign("HMAC", key, msgBytes);
-  return base64UrlEncode(new Uint8Array(sig));
-}
-function timingSafeEqualB64Url(a, b) {
-  a = String(a || "");
-  b = String(b || "");
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-}
-
 /* ========================== MINI APP INLINE ASSETS ========================== */
 function htmlResponse(html, status = 200) {
   return new Response(html, { status, headers: { "content-type": "text/html; charset=utf-8" } });
@@ -6156,6 +5607,17 @@ function jsResponse(js, status = 200) {
 }
 function jsonResponse(obj, status = 200) {
   return new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json; charset=utf-8" } });
+}
+
+function pathEndsWith(pathname, suffix) {
+  const p = String(pathname || "");
+  const s = String(suffix || "");
+  return p === s || p.endsWith(s);
+}
+function pathIncludes(pathname, needle) {
+  const p = String(pathname || "");
+  const n = String(needle || "");
+  return !!n && p.includes(n);
 }
 
 
@@ -6185,80 +5647,61 @@ async function buildMiniappGuestPayload(env) {
 }
 
 async function issueMiniappToken(env, userId, fromLike = {}) {
-  // Legacy KV-backed tokens (fast revoke) + Stateless fallback (no KV required)
-  const ttlSec = Math.max(3600, Number(env.MINIAPP_TOKEN_TTL_SEC || 0) || (30 * 24 * 60 * 60)); // default 30d
-  const exp = Math.floor(Date.now() / 1000) + ttlSec;
-
-  // KV-backed token
-  if (env.BOT_KV) {
-    const raw = crypto.getRandomValues(new Uint8Array(24));
-    const token = Array.from(raw).map((b) => b.toString(16).padStart(2, "0")).join("");
-    const payload = {
-      userId: String(userId || ""),
-      username: String(fromLike?.username || ""),
-      exp,
-    };
-    await env.BOT_KV.put(`miniapp_token:${token}`, JSON.stringify(payload), { expirationTtl: ttlSec });
-    return token;
-  }
-
-  // Stateless token: m1.<b64url(payload_json) >.<b64url(hmac)>
-  const secret = String(env.MINIAPP_TOKEN_SECRET || env.TELEGRAM_BOT_TOKEN || "").trim();
-  if (!secret) return "";
-  const payload = { userId: String(userId || ""), username: String(fromLike?.username || ""), exp };
-  const body = base64UrlEncode(utf8(JSON.stringify(payload)));
-  const sig = await hmacSha256Base64url(utf8(secret), utf8(body));
-  return `m1.${body}.${sig}`;
+  if (!env.BOT_KV) return "";
+  const raw = crypto.getRandomValues(new Uint8Array(24));
+  const token = Array.from(raw).map((b) => b.toString(16).padStart(2, "0")).join("");
+  const payload = {
+    userId: String(userId || ""),
+    username: String(fromLike?.username || ""),
+    createdAt: Date.now(),
+  };
+  await env.BOT_KV.put(`miniapp_token:${token}`, JSON.stringify(payload), { expirationTtl: Math.max(300, Number(env.MINIAPP_TOKEN_TTL_SEC || 86400)) });
+  return token;
 }
-
 
 async function verifyMiniappToken(token, env) {
-  token = String(token || "").trim();
-  if (!token) return { ok: false, reason: "token_missing" };
-
-  // Stateless token
-  if (token.startsWith("m1.")) {
-    const secret = String(env.MINIAPP_TOKEN_SECRET || env.TELEGRAM_BOT_TOKEN || "").trim();
-    if (!secret) return { ok: false, reason: "token_secret_missing" };
-    const parts = token.split(".");
-    if (parts.length !== 3) return { ok: false, reason: "token_invalid" };
-    const body = parts[1];
-    const sig = parts[2];
-    const expected = await hmacSha256Base64url(utf8(secret), utf8(body));
-    if (!timingSafeEqualB64Url(expected, sig)) return { ok: false, reason: "token_bad_sig" };
-
-    const jsonStr = new TextDecoder().decode(base64UrlDecode(body));
-    const j = safeJsonParse(jsonStr) || {};
-    const userId = String(j?.userId || "").trim();
-    const exp = Number(j?.exp || 0);
-    if (!userId) return { ok: false, reason: "token_user_missing" };
-    if (exp && Math.floor(Date.now() / 1000) > exp) return { ok: false, reason: "token_expired" };
-    return { ok: true, userId, fromLike: { username: String(j?.username || "") }, via: "mini_token_stateless" };
-  }
-
-  // KV-backed token (legacy)
-  if (!env.BOT_KV) return { ok: false, reason: "token_store_missing" };
-  const raw = await env.BOT_KV.get(`miniapp_token:${token}`);
+  if (!env.BOT_KV || !token) return { ok: false, reason: "token_missing" };
+  const raw = await env.BOT_KV.get(`miniapp_token:${String(token).trim()}`);
   if (!raw) return { ok: false, reason: "token_invalid" };
-  const j = safeJsonParse(raw) || {};
-  const userId = String(j?.userId || "").trim();
-  if (!userId) return { ok: false, reason: "token_user_missing" };
-  const exp = Number(j?.exp || 0);
-  if (exp && Math.floor(Date.now() / 1000) > exp) return { ok: false, reason: "token_expired" };
-  return { ok: true, userId, fromLike: { username: String(j?.username || "") }, via: "mini_token_kv" };
+  try {
+    const j = JSON.parse(raw);
+    const userId = String(j?.userId || "").trim();
+    if (!userId) return { ok: false, reason: "token_user_missing" };
+    return { ok: true, userId, fromLike: { username: String(j?.username || "") }, via: "mini_token" };
+  } catch {
+    return { ok: false, reason: "token_bad_json" };
+  }
 }
 
-
 async function verifyMiniappAuth(body, env) {
+  // 1) Web access tokens (برای باز شدن پنل ادمین/اونر در مرورگر)
+  const webToken = String(body?.webToken || "").trim();
+  if (webToken) {
+    const ownerTok = String(env.WEB_OWNER_TOKEN || "").trim();
+    const adminTok = String(env.WEB_ADMIN_TOKEN || "").trim();
+    if (ownerTok && timingSafeEqual(webToken, ownerTok)) {
+      const username = firstHandleFromCsv(env.OWNER_HANDLES) || "owner";
+      return { ok: true, userId: 999000001, fromLike: { username } };
+    }
+    if (adminTok && timingSafeEqual(webToken, adminTok)) {
+      const username = firstHandleFromCsv(env.ADMIN_HANDLES) || firstHandleFromCsv(env.OWNER_HANDLES) || "admin";
+      return { ok: true, userId: 999000002, fromLike: { username } };
+    }
+  }
+
+  // 2) Standard Telegram MiniApp auth (initData)
   const initData = body?.initData;
   const v = await verifyTelegramInitData(initData, env.TELEGRAM_BOT_TOKEN, env.INITDATA_MAX_AGE_SEC, env.MINIAPP_AUTH_LENIENT);
   if (v.ok) return v;
+
+  // 3) MiniToken fallback (issued by bot)
   const token = String(body?.miniToken || "").trim();
   if (!token) return v;
   const tv = await verifyMiniappToken(token, env);
   if (tv.ok) return tv;
   return v;
 }
+
 
 /* ========================== TELEGRAM MINI APP initData verification ========================== */
 async function verifyTelegramInitData(initData, botToken, maxAgeSecRaw, lenientRaw) {
@@ -6314,6 +5757,15 @@ async function hmacSha256Hex(keyBytes, msgBytes) {
   return toHex(new Uint8Array(sig));
 }
 function toHex(u8) { let out=""; for (const b of u8) out += b.toString(16).padStart(2,"0"); return out; }
+function timingSafeEqual(a, b) {
+  a = String(a || "");
+  b = String(b || "");
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
 function timingSafeEqualHex(a, b) {
   a = String(a || "").toLowerCase();
   b = String(b || "").toLowerCase();
@@ -6583,6 +6035,7 @@ const MINI_APP_HTML = `<!doctype html>
       <button class="tab-btn" data-tab="analysis">تحلیل</button>
       <button class="tab-btn" data-tab="news">اخبار</button>
       <button class="tab-btn" data-tab="admin">پنل مدیریت</button>
+      <button class="tab-btn" data-tab="owner">پنل اونر</button>
     </div>
 
     <div class="grid">
@@ -6803,6 +6256,14 @@ const MINI_APP_HTML = `<!doctype html>
             <div class="admin-row">
               <input id="freeDailyLimit" class="control" placeholder="مثلاً 3" />
               <button id="saveFreeLimit" class="btn">ذخیره سهمیه</button>
+            </div>
+          </div>
+
+          <div class="field">
+            <div class="label">امتیاز پایه کاربران</div>
+            <div class="admin-row">
+              <input id="basePoints" class="control" placeholder="مثلاً 100" />
+              <button id="saveBasePoints" class="btn">ذخیره امتیاز پایه</button>
             </div>
           </div>
 
@@ -7040,7 +6501,20 @@ const LOCAL_KEYS = {
   newsAnalysisCache: "miniapp_news_analysis_cache_v1",
   analyzeCache: "miniapp_analyze_cache_v1",
 };
-const API_BASE = String(window.__API_BASE__ || window.location.origin).replace(/\/+$/,"");
+const ORIGIN = window.location.origin;
+const ROOT_PREFIX = (() => {
+  const p0 = window.location.pathname || "";
+  const p = p0.endsWith("/") ? p0.slice(0, -1) : p0;
+  const marker = "/miniapp";
+  const i = p.indexOf(marker);
+  if (i >= 0) return p.slice(0, i);
+  return "";
+})();
+function apiUrl(path) {
+  let p = String(path || "");
+  if (!p.startsWith("/")) p = "/" + p;
+  return ORIGIN + ROOT_PREFIX + p;
+}
 let ADMIN_TICKETS = [];
 let ADMIN_TICKETS_ALL = [];
 let ADMIN_WITHDRAWALS = [];
@@ -7068,7 +6542,8 @@ function getFreshInitData() {
 }
 
 function buildAuthBody(extra = {}) {
-  return { initData: getFreshInitData(), miniToken: MINI_TOKEN || localStorage.getItem(LOCAL_KEYS.miniToken) || "", ...extra };
+  const webToken = getParamEverywhere("access") || getParamEverywhere("webToken") || "";
+  return { initData: getFreshInitData(), miniToken: MINI_TOKEN || localStorage.getItem(LOCAL_KEYS.miniToken) || "", webToken, ...extra };
 }
 
 function parseMiniTokenStartParam(raw) {
@@ -7109,13 +6584,19 @@ function hideToast(){ if (toast) toast.classList.remove("show"); }
 
 
 function applyTab(tab){
-  const selected = tab || "dashboard";
+  const raw = tab || "dashboard";
+  const section = (raw === "owner") ? "admin" : raw;
+
   document.querySelectorAll(".tab-btn").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.tab === selected);
+    btn.classList.toggle("active", btn.dataset.tab === raw);
   });
   document.querySelectorAll(".tab-section").forEach((sec) => {
-    sec.classList.toggle("active", sec.dataset.tabSection === selected);
+    sec.classList.toggle("active", sec.dataset.tabSection === section);
   });
+
+  // If owner opens the owner panel, force admin card to present owner view.
+  if (raw === "owner" && adminTitle) adminTitle.textContent = "پنل اونر";
+  if (raw === "admin" && adminTitle) adminTitle.textContent = IS_OWNER ? "پنل اونر" : "پنل ادمین";
 }
 
 function setupTabs(){
@@ -7214,7 +6695,7 @@ async function api(path, body){
       const ac = new AbortController();
       const quickMs = i === 0 ? 4500 : 9000;
       const tm = setTimeout(() => ac.abort("timeout"), quickBoot ? quickMs : (12000 + (i * 4000)));
-      const r = await fetch(API_BASE + path, {        method: "POST",
+      const r = await fetch(apiUrl(path), {        method: "POST",
         headers: {"content-type":"application/json"},
         body: JSON.stringify(body),
         signal: ac.signal,
@@ -7242,7 +6723,7 @@ function prettyErr(j, status){
   if (status === 403 && String(e) === "forbidden") return "دسترسی این بخش برای نقش فعلی شما مجاز نیست.";
   if (status === 401) {
     if (String(e).includes("initData")) return "اتصال مینی‌اپ منقضی شده؛ اپ را مجدد از داخل تلگرام باز کنید.";
-    return "احراز هویت تلگرام ناموفق است.\n\n" + MINIAPP_EXEC_CHECKLIST;
+    return "احراز هویت تلگرام ناموفق است.\n\n" + MINIAPP_EXEC_CHECKLIST_TEXT;
   }
   return "مشکلی پیش آمد. لطفاً دوباره تلاش کنید.";
 }
@@ -7733,7 +7214,7 @@ function applyUserState(json) {
   if (json.state?.risk) setVal("risk", json.state.risk);
   if (typeof json.state?.customPromptId === "string") setVal("customPrompt", json.state.customPromptId);
   setVal("newsEnabled", String(!!json.state?.newsEnabled));
-  setVal("promptMode", json.state?.promptMode || "style_plus_custom");
+  setVal("promptMode", json.state?.promptMode || "style_only");
 
   if (json.state?.selectedSymbol && (json.symbols || []).includes(json.state.selectedSymbol)) {
     setVal("symbol", json.state.selectedSymbol);
@@ -7856,7 +7337,7 @@ async function boot(){
     if (!cached) {
       const fallback = {
         welcome: "نسخه محدود مینی‌اپ فعال شد.",
-        state: { timeframe: "H4", style: "پرایس اکشن", risk: "متوسط", newsEnabled: true, promptMode: "style_plus_custom", selectedSymbol: "BTCUSDT" },
+        state: { timeframe: "H4", style: "پرایس اکشن", risk: "متوسط", newsEnabled: true, promptMode: "style_only", selectedSymbol: "BTCUSDT" },
         quota: "guest",
         symbols: ["BTCUSDT","ETHUSDT","XAUUSD","EURUSD"],
         styles: ["پرایس اکشن","ICT","ATR"],
@@ -7872,7 +7353,7 @@ async function boot(){
       pillTxt.textContent = "Offline (Guest)";
       out.textContent = "حالت محدود فعال شد ✅ داده‌های پایه بارگذاری شدند.";
       showToast("حالت محدود", "برای همه امکانات، مینی‌اپ را از داخل تلگرام باز کنید.", "GUEST", false);
-      if (status === 401) out.textContent = "اتصال کامل برقرار نشد.\n\n" + MINIAPP_EXEC_CHECKLIST;
+      if (status === 401) out.textContent = "اتصال کامل برقرار نشد.\n\n" + MINIAPP_EXEC_CHECKLIST_TEXT;
       setupLiveQuotePolling();
       setupNewsPolling();
       return;
@@ -7907,8 +7388,10 @@ async function boot(){
   IS_OWNER = json.role === "owner";
   IS_GUEST = !!json.guest;
 
-  const adminTabBtn = document.querySelector(".tab-btn[data-tab="admin"]");
+  const adminTabBtn = document.querySelector('.tab-btn[data-tab="admin"]');
+  const ownerTabBtn = document.querySelector('.tab-btn[data-tab="owner"]');
   if (adminTabBtn) adminTabBtn.style.display = IS_STAFF ? "inline-flex" : "none";
+  if (ownerTabBtn) ownerTabBtn.style.display = IS_OWNER ? "inline-flex" : "none";
 
   if (IS_STAFF && adminCard) {
     adminCard.classList.add("show");
@@ -7938,6 +7421,7 @@ async function loadAdminBootstrap(){
   if (el("stylePromptJson")) el("stylePromptJson").value = JSON.stringify(json.stylePrompts || {}, null, 2);
   if (el("customPromptsJson")) el("customPromptsJson").value = JSON.stringify(json.customPrompts || [], null, 2);
   if (el("freeDailyLimit")) el("freeDailyLimit").value = String(json.freeDailyLimit ?? "");
+  if (el("basePoints")) el("basePoints").value = String(json.basePoints ?? "");
   if (el("offerBannerInput")) el("offerBannerInput").value = json.offerBanner || "";
   if (el("offerBannerImageUrlInput")) el("offerBannerImageUrlInput").value = json.offerBannerImage || "";
   if (el("welcomeBotInput")) el("welcomeBotInput").value = json.welcomeBot || "";
@@ -7995,7 +7479,7 @@ el("save").addEventListener("click", async () => {
     promptMode: val("promptMode") || "style_plus_custom",
     selectedSymbol: val("symbol") || "",
     customPromptId: val("customPrompt") || "",
-  };
+  });
 
   const {status, json} = await api("/api/settings", payload);
   if (!json?.ok) {
@@ -8027,7 +7511,17 @@ el("analyze").addEventListener("click", async () => {
   showToast("در حال تحلیل…", "جمع‌آوری دیتا + تولید خروجی", "AI", true);
   out.textContent = "⏳ در حال تحلیل…";
 
-  const payload = buildAuthBody({ symbol: val("symbol"), userPrompt: "" });
+  const payload = buildAuthBody({
+    symbol: val("symbol"),
+    userPrompt: "",
+    timeframe: val("timeframe"),
+    style: val("style"),
+    risk: val("risk"),
+    newsEnabled: (val("newsEnabled") === "true"),
+    promptMode: val("promptMode"),
+    customPromptId: val("customPrompt"),
+    selectedSymbol: val("symbol"),
+  });
 
   const {status, json} = await api("/api/analyze", payload);
   if (!json?.ok) {
@@ -8165,6 +7659,12 @@ el("saveFreeLimit")?.addEventListener("click", async () => {
   if (json?.ok) showToast("ذخیره شد ✅", "سهمیه رایگان بروزرسانی شد", "ADM", false);
 });
 
+
+el("saveBasePoints")?.addEventListener("click", async () => {
+  const basePoints = Number(el("basePoints")?.value || 0);
+  const { json } = await adminApi("/api/admin/points/base", { basePoints });
+  if (json?.ok) showToast("ذخیره شد ✅", "امتیاز پایه بروزرسانی شد", "ADM", false);
+});
 
 el("saveOfferBanner")?.addEventListener("click", async () => {
   const offerBanner = el("offerBannerInput")?.value || "";
@@ -8452,7 +7952,7 @@ el("loadUsers")?.addEventListener("click", async () => {
 el("downloadReportPdf")?.addEventListener("click", async () => {
   try {
     showToast("در حال ساخت PDF…", "گزارش کامل", "PDF", true);
-    const r = await fetch(API_BASE + "/api/admin/report/pdf", {      method: "POST",
+    const r = await fetch(apiUrl("/api/admin/report/pdf"), {      method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ initData: INIT_DATA, limit: 250 }),
     });
@@ -8513,7 +8013,7 @@ async function runDailySuggestions(env) {
     const style = u.style || "پرایس اکشن";
     const symbol = String(u?.selectedSymbol || u?.profile?.preferredSymbol || "BTCUSDT").toUpperCase();
     const cap = u.capital?.enabled === false ? "" : (u.capital?.amount ? (" | سرمایه: " + u.capital.amount) : "");
-    const articles = await fetchSymbolNewsFa(symbol, 5, env).catch(() => []);
+    const articles = await fetchSymbolNewsFa(symbol, env).catch(() => []);
     const newsBlock = Array.isArray(articles) && articles.length
       ? articles.slice(0, 2).map((x, i) => `${i + 1}) ${x?.title || ""}`).join(String.fromCharCode(10))
       : "";
