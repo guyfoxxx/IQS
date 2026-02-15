@@ -1508,7 +1508,7 @@ const STYLE_PROMPTS_DEFAULT = {
 
 در انتهای خروجی، فقط و فقط این بلاک را اضافه کن:
 <QCJSON>{"zones":[],"supports":[],"resistances":[],"tp":[],"sl":0}</QCJSON>`,
-  "ICT/Smart Money": `{
+  "ICT": `{
   "role": "سیستم",
   "identity": {
     "title": "تحلیل‌گر ICT و اسمارت‌مانی",
@@ -1755,6 +1755,7 @@ function normalizeStyleLabel(style) {
   if (!s) return "";
   const low = s.toLowerCase();
   if (low === "price action" || low === "priceaction") return "پرایس اکشن";
+  if (low === "ict/smart money" || low === "ict smart money" || low === "smart money") return "ICT";
   if (low === "ict") return "ICT";
   if (low === "atr") return "ATR";
   return s;
@@ -3043,7 +3044,7 @@ async function visionProvider(name, imageUrl, visionPrompt, env, getCache, setCa
   if (name === "openai") {
     if (!providerApiKey("openai", env, imageUrl) && !env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY_missing");
     const body = {
-      model: env.OPENAI_MODEL || "gpt-4o-mini",
+      model: env.OPENAI_MODEL || "gpt-5",
       messages: [{
         role: "user",
         content: [
