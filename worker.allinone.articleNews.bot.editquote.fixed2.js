@@ -2836,6 +2836,7 @@ async function runTextProviders(prompt, env, orderOverride) {
 }
 
 async function runPolishProviders(draft, env, orderOverride) {
+  if (String(env.ENABLE_POLISH || "0") !== "1") return draft;
   const raw = (orderOverride || env.POLISH_PROVIDER_ORDER || "").toString().trim();
   if (!raw) return draft;
 
@@ -2896,12 +2897,13 @@ async function runVisionProviders(imageUrl, visionPrompt, env, orderOverride) {
 
 async function textProvider(name, prompt, env) {
   name = String(name || "").toLowerCase();
+  const textMaxTokens = Math.max(1200, Number(env.TEXT_MAX_TOKENS || 2800));
 
   if (name === "cf") {
     if (!env.AI) throw new Error("AI_binding_missing");
     const out = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
       messages: [{ role: "user", content: prompt }],
-      max_tokens: 900,
+      max_tokens: textMaxTokens,
       temperature: 0,
     });
     return out?.response || out?.result || "";
@@ -2928,6 +2930,7 @@ async function textProvider(name, prompt, env) {
         body: JSON.stringify({
           model: env.OPENAI_MODEL || "gpt-5",
           messages: [{ role: "user", content: prompt }],
+          max_completion_tokens: textMaxTokens,
           temperature: 0,
         }),
       }, TIMEOUT_TEXT_MS);
@@ -2957,6 +2960,7 @@ async function textProvider(name, prompt, env) {
       body: JSON.stringify({
         model: env.OPENROUTER_MODEL || "openai/gpt-4o-mini",
         messages: [{ role: "user", content: prompt }],
+        max_tokens: textMaxTokens,
         temperature: 0,
       }),
     }, TIMEOUT_TEXT_MS);
@@ -2976,6 +2980,7 @@ async function textProvider(name, prompt, env) {
       body: JSON.stringify({
         model: env.DEEPSEEK_MODEL || "deepseek-chat",
         messages: [{ role: "user", content: prompt }],
+        max_tokens: textMaxTokens,
         temperature: 0,
       }),
     }, TIMEOUT_TEXT_MS);
@@ -2993,7 +2998,7 @@ async function textProvider(name, prompt, env) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0, maxOutputTokens: 900 },
+          generationConfig: { temperature: 0, maxOutputTokens: textMaxTokens },
         }),
       },
       TIMEOUT_TEXT_MS
