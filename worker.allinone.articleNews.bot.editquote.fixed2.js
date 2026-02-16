@@ -1758,6 +1758,7 @@ function normalizeStyleLabel(style) {
   if (low === "پرایس‌اکشن" || low === "price-action") return "پرایس اکشن";
   if (low === "price action" || low === "priceaction") return "پرایس اکشن";
   if (low === "ict/smart money" || low === "ict smart money" || low === "smart money") return "ICT";
+  if (low === "اسمارت مانی" || low === "اسمارت‌مانی") return "ICT";
   if (low === "ict") return "ICT";
   if (low === "atr") return "ATR";
   return s;
@@ -3212,11 +3213,11 @@ function pickApiKey(pool, seed) {
 function resolveMarketProviderChain(env, symbol, timeframe = "H4") {
   const kind = assetKind(symbol);
   const defaultsByKind = {
-    crypto: ["binance", "nobitex", "kucoin", "bybit", "coingecko", "cryptocompare", "yahoo"],
-    forex: ["twelvedata", "finnhub", "alphavantage", "stooq", "yahoo"],
-    metal: ["twelvedata", "finnhub", "alphavantage", "stooq", "yahoo"],
-    index: ["twelvedata", "finnhub", "alphavantage", "stooq", "yahoo"],
-    stock: ["finnhub", "twelvedata", "alphavantage", "stooq", "yahoo"],
+    crypto: ["tradingview", "binance", "nobitex", "kucoin", "bybit", "coingecko", "cryptocompare", "yahoo"],
+    forex: ["tradingview", "twelvedata", "finnhub", "alphavantage", "stooq", "yahoo"],
+    metal: ["tradingview", "twelvedata", "finnhub", "alphavantage", "stooq", "yahoo"],
+    index: ["tradingview", "twelvedata", "finnhub", "alphavantage", "stooq", "yahoo"],
+    stock: ["tradingview", "finnhub", "twelvedata", "alphavantage", "stooq", "yahoo"],
     unknown: ["yahoo"],
   };
   const fallback = defaultsByKind[kind] || defaultsByKind.unknown;
@@ -3224,6 +3225,56 @@ function resolveMarketProviderChain(env, symbol, timeframe = "H4") {
   const filtered = desired.filter((p) => providerSupportsSymbol(p, symbol, env));
   const chain = filtered.length ? filtered : ["yahoo"];
   return chain;
+}
+
+function mapTimeframeToTvResolution(tf) {
+  const m = { M15: "15", H1: "60", H4: "240", D1: "D" };
+  return m[String(tf || "").toUpperCase()] || "240";
+}
+
+function toTradingViewSymbol(symbol) {
+  const s = String(symbol || "").toUpperCase();
+  if (s.endsWith("USDT")) return `BINANCE:${s}`;
+  if (/^[A-Z]{6}$/.test(s)) return `FX:${s}`;
+  if (s === "XAUUSD" || s === "XAGUSD") return `OANDA:${s}`;
+  if (s === "DJI") return "TVC:DJI";
+  if (s === "NDX") return "TVC:NDX";
+  if (s === "SPX") return "TVC:SPX";
+  return s.includes(":") ? s : `NASDAQ:${s}`;
+}
+
+async function fetchTradingViewCandles(symbol, timeframe, limit, timeoutMs, env) {
+  const base = String(env.TRADINGVIEW_HISTORY_URL || "").trim();
+  if (!base) throw new Error("tradingview_history_url_missing");
+  const now = Math.floor(Date.now() / 1000);
+  const tf = String(timeframe || "H4").toUpperCase();
+  const stepSec = tf === "M15" ? 900 : tf === "H1" ? 3600 : tf === "H4" ? 14400 : 86400;
+  const from = now - stepSec * Math.max(150, Number(limit || 120) * 3);
+  const tvSymbol = toTradingViewSymbol(symbol);
+  const url = new URL(base);
+  url.searchParams.set("symbol", tvSymbol);
+  url.searchParams.set("resolution", mapTimeframeToTvResolution(tf));
+  url.searchParams.set("from", String(from));
+  url.searchParams.set("to", String(now));
+
+  const r = await fetchWithTimeout(url.toString(), { headers: { "User-Agent": "Mozilla/5.0" } }, timeoutMs);
+  if (!r.ok) throw new Error(`tradingview_http_${r.status}`);
+  const j = await r.json().catch(() => null);
+  const t = Array.isArray(j?.t) ? j.t : [];
+  const o = Array.isArray(j?.o) ? j.o : [];
+  const h = Array.isArray(j?.h) ? j.h : [];
+  const l = Array.isArray(j?.l) ? j.l : [];
+  const c = Array.isArray(j?.c) ? j.c : [];
+  if (!t.length || !c.length) throw new Error("tradingview_no_data");
+  const candles = t.map((x, i) => ({
+    t: Number(x) * 1000,
+    o: Number(o[i]),
+    h: Number(h[i]),
+    l: Number(l[i]),
+    c: Number(c[i]),
+    v: Array.isArray(j?.v) ? Number(j.v[i]) : null,
+  })).filter((x) => Number.isFinite(x.c));
+  return candles.slice(-limit);
 }
 
 
